@@ -31,7 +31,7 @@ To set up your multilingual system-wide TTS engine, simply run these commands in
 
 ```bash
 # 1. Clone this repository
-git clone https://github.com/artibex/hyprland-tts
+git clone https://github.com/artibex/hyprland-tts.git
 cd hyprland-tts
 
 # 2. Make the installer executable
