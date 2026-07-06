@@ -14,13 +14,36 @@ optdepends=(
   'hyprland: target compositor for keybinds'
 )
 makedepends=('make')
-source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')  # TODO: replace with the real checksum once the tag is published
+
+# ---------------------------------------------------------------------------
+# LOCAL / DEV BUILD (default): builds from this working tree. Run `makepkg`
+# from inside the repo. No git tag or network needed — picks up your current
+# files. This is what to use while iterating on `main`.
+# ---------------------------------------------------------------------------
+source=()
+sha256sums=()
 
 package() {
-  cd "$srcdir/$pkgname-$pkgver"
+  cd "$startdir"
   make PREFIX=/usr DESTDIR="$pkgdir" install
 }
+
+# ---------------------------------------------------------------------------
+# AUR RELEASE BUILD: when you publish, tag a release and swap the block above
+# for the two lines below (and drop the local package() cd), then regenerate
+# .SRCINFO with `makepkg --printsrcinfo > .SRCINFO`:
+#
+#   source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+#   sha256sums=('SKIP')   # replace SKIP with the real checksum
+#
+#   package() {
+#     cd "$srcdir/$pkgname-$pkgver"
+#     make PREFIX=/usr DESTDIR="$pkgdir" install
+#   }
+#
+# Tag + push a release with:
+#   git tag v1.1.0 && git push origin v1.1.0
+# ---------------------------------------------------------------------------
 
 # After install, each user runs:  hyprland-tts setup
 # ...to wire the keybinds into their own ~/.config/hypr, then installs a voice
