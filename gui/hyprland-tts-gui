@@ -26,6 +26,46 @@ if hasattr(os, "geteuid") and os.geteuid() == 0 and os.environ.get("HYPRLAND_TTS
     )
     sys.exit(1)
 
+
+def _reexec_with_gtk_python():
+    """If the interpreter running this script (whatever invoked it — a
+    terminal, `hyprland-tts gui`, or a desktop launcher's own Exec= using this
+    script's #!/usr/bin/env python3 shebang directly) can't import GTK4/
+    libadwaita, but /usr/bin/python3 can, re-exec under that one instead of
+    just failing.
+
+    Why this exists: `bin/hyprland-tts gui` already probes for a working
+    python3 (see _gui_python there) because a PATH-shadowing interpreter
+    (pyenv/mise/conda/uv/asdf) can sit ahead of /usr/bin/python3 and lacks the
+    system PyGObject install — that was a real bug a user hit. But a desktop
+    launcher's Exec= can invoke this script directly, bypassing that wrapper
+    entirely and falling back to this file's own shebang — which re-triggers
+    the exact same class of failure, silently, since a launcher has no
+    terminal to show the resulting ModuleNotFoundError in. Doing the same
+    probe-and-reexec here means it's fixed regardless of launch path.
+    """
+    if os.environ.get("_HYPRLAND_TTS_GUI_REEXECED") == "1":
+        return  # already retried once; don't loop if /usr/bin/python3 also fails
+    try:
+        import gi
+        gi.require_version("Gtk", "4.0")
+        gi.require_version("Adw", "1")
+        return  # current interpreter already works, nothing to do
+    except Exception:
+        pass
+    candidate = "/usr/bin/python3"
+    if os.path.realpath(sys.executable) == os.path.realpath(candidate):
+        return  # already running it and it still failed above
+    if os.access(candidate, os.X_OK):
+        os.environ["_HYPRLAND_TTS_GUI_REEXECED"] = "1"
+        try:
+            os.execv(candidate, [candidate, os.path.realpath(__file__), *sys.argv[1:]])
+        except Exception:
+            pass  # fall through to the normal import-error handling below
+
+
+_reexec_with_gtk_python()
+
 # Fail with a clear, non-scary message if the GTK stack isn't present.
 try:
     import gi

@@ -71,6 +71,16 @@ log()  { printf '%s\n' "$*" >&2; }
 die()  { printf 'error: %b\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Best-effort desktop notification. Exists because keybind-triggered actions
+# (Hyprland `exec`s them with no terminal attached) can fail in ways `die`'s
+# stderr write will never surface to the user — a silent failure looks
+# identical to "nothing happened" and "this needs a dependency I don't have".
+# Never required: no-ops if notify-send/a notification daemon isn't present.
+notify() {
+  have notify-send || return 0
+  notify-send -a "hyprland-tts" -i audio-speakers "$1" "${2:-}" >/dev/null 2>&1 || true
+}
+
 load_config() {
   [ -f "$CONFIG_FILE" ] || return 0
   # shellcheck disable=SC1090

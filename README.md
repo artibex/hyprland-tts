@@ -184,6 +184,27 @@ Wayland session and your own `~/.config`/`~/.local` — as root neither is reach
 you'll get errors like `Authorization required` or `Gtk couldn't be initialized`. Every
 subcommand refuses to run as root for this reason; just run it as your normal user.
 
+**The desktop menu icon doesn't launch the GUI, but it works from a terminal.** This was a
+real bug: the app-launcher environment can resolve `python3` differently than a terminal
+shell does, and — unlike `hyprland-tts gui` — a raw `.desktop` launch had no fallback for
+that. Both are fixed (the `.desktop` entry now goes through the same CLI wrapper, and the
+GUI script self-corrects its interpreter either way); update to the latest package if
+you're still seeing this.
+
+**A shortcut (e.g. hover) seems to do nothing at all, even right after installing.** Before
+assuming something's broken: check what's *actually* bound, since a keybind can silently
+differ from the documented default (yours or an earlier customization):
+
+```bash
+hyprland-tts keybind list          # what's really bound right now
+hyprland-tts keybind reset hover   # back to the SUPER+ALT+H default, if you want it
+```
+
+No reboot or reinstall is needed for keybind changes — `hyprland-tts setup` (or any
+`keybind set`/`reset`) already reloads Hyprland for you. If a shortcut still does nothing
+and you have `libnotify` installed, hover will now pop a desktop notification when a real
+dependency (Hyprland, AT-SPI) is missing, instead of failing in total silence.
+
 ---
 
 ## 🤖 Contributing

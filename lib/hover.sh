@@ -42,7 +42,10 @@ _hover_python() {
 
 cmd_hover() {
   load_config
-  have hyprctl || die "'hover' needs Hyprland (hyprctl not found)"
+  if ! have hyprctl; then
+    notify "hyprland-tts: hover unavailable" "hyprctl not found — this shortcut needs Hyprland."
+    die "'hover' needs Hyprland (hyprctl not found)"
+  fi
 
   local pos x y
   pos="$(hyprctl cursorpos 2>/dev/null)" || die "could not query cursor position"
@@ -50,11 +53,15 @@ cmd_hover() {
   y="$(printf '%s' "$pos" | awk -F',' '{gsub(/[[:space:]]/,"",$2); print $2}')"
   [[ "$x" =~ ^-?[0-9]+$ ]] && [[ "$y" =~ ^-?[0-9]+$ ]] || die "unexpected 'hyprctl cursorpos' output: $pos"
 
-  # AT-SPI is optional (at-spi2-core, python-gobject's Atspi typelib) — if it's
-  # not available, stay silent rather than erroring on every press of an
-  # opt-in accessibility shortcut.
+  # AT-SPI is optional (at-spi2-core, python-gobject's Atspi typelib). If it's
+  # missing, notify once per press rather than staying totally silent — this
+  # is a persistent, fixable setup problem, not a "nothing was here" miss, and
+  # a keybind-triggered command has no terminal to explain itself otherwise.
   local py
-  py="$(_hover_python)" || exit 0
+  if ! py="$(_hover_python)"; then
+    notify "hyprland-tts: hover unavailable" "Install at-spi2-core (and make sure python-gobject sees it) to use this shortcut."
+    exit 0
+  fi
 
   # hint hover-read.py which app is actually focused/on top: AT-SPI has no
   # concept of window stacking order, so without this an occluded background

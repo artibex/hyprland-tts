@@ -149,6 +149,30 @@ rendered and the playlist is drained.
     including in other people's open documents/messages if the pointer happens to be there.
     That's inherent to what the feature does (same as it would be for any screen reader),
     not a bug — but worth being upfront about in the README, which it now is.
+  - **Missing-dependency notifications (`common.sh::notify`).** A keybind-triggered action
+    has no terminal to show a `die` message to — a silent failure and "the shortcut isn't
+    even bound" look identical to the user. Confirmed for real: a user reported hover
+    "not working" after install; the real cause turned out to be a stale/custom keybind
+    (see next bullet), but while diagnosing it we realized a genuinely missing dependency
+    (no AT-SPI, no `hyprctl`) would have been just as silent and just as confusing. Fixed
+    by adding `notify()` (best-effort `notify-send`, no-ops without a notification daemon)
+    and calling it from `cmd_hover`'s two dependency-missing paths — but deliberately
+    **not** from the "no text found at this point" exit, since that's an expected, frequent
+    outcome while moving the mouse around and would just be spam.
+  - **Keybind overrides can silently diverge from the documented defaults — check the
+    live config, don't assume the default is what's bound.** Confirmed for real: a user's
+    live `~/.config/piper-tts/config` had `KEY_hover=SUPER ALT, a` (not the default
+    `SUPER ALT, H`) alongside `KEY_speak=SUPER, a` — a deliberate-looking pairing (same
+    letter, ALT for the "alternate" action), most likely set via the GUI's Shortcuts tab
+    or `keybind set` at some point. The feature was fully installed, wired, and working
+    (`hyprctl binds -j` showed it live) — the user was almost certainly pressing the
+    *documented* default (`H`) instead of their own actual bound key (`A`). When a user
+    reports a keybind-triggered action "not working," **check `hyprland-tts keybind list`
+    (or `~/.config/piper-tts/config` for `KEY_*`) before assuming the code is broken** —
+    a config/documentation mismatch produces identical symptoms to a real bug (total
+    silence) and is much more common than it looks. Rebooting or reinstalling will not
+    fix this; only `hyprland-tts keybind list` (to see the truth) or `keybind reset`
+    (to restore defaults) will.
 
 ---
 
@@ -193,6 +217,18 @@ rendered and the playlist is drained.
   `/usr/bin/python3` explicitly, and launch the GUI with that resolved interpreter
   (`"$py" "$gui"`, not `exec "$gui"`) so the check and the actual run always agree — never
   rely on the GUI script's own `#!/usr/bin/env python3` shebang for this.
+  **This fix only covers launches that go through `bin/hyprland-tts gui`.** A `.desktop`
+  file's `Exec=` (or anything else invoking `hyprland-tts-gui` directly) bypasses the
+  wrapper entirely and hits the same PATH-shadowing bug again via the script's own
+  shebang — confirmed for real: the user's desktop-menu launch silently did nothing (no
+  terminal to show the resulting `ModuleNotFoundError`), while `hyprland-tts gui` from a
+  terminal worked fine. Two fixes, both shipped: the `.desktop` file's `Exec=` now reads
+  `hyprland-tts gui` (routes through the wrapper like everything else — "one brain, thin
+  skins" applies to desktop entries too), **and** `gui/hyprland-tts-gui` itself now probes
+  and self-`exec`s into `/usr/bin/python3` at the top of the script (`_reexec_with_gtk_python`)
+  as defense-in-depth for any launch path that still invokes the raw binary. Verified live:
+  running the script directly under this box's PATH-shadowed `python3` now correctly
+  re-execs into the system one and GTK initializes, instead of a silent `ModuleNotFoundError`.
 - **Never run any part of this tool as root/via `sudo`.** Confirmed for real: after hitting
   the bug above, the user tried `sudo hyprland-tts gui`, which crashed with
   `Authorization required` / `Gtk couldn't be initialized` — root has no access to the

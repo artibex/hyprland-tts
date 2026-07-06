@@ -14,6 +14,7 @@ optdepends=(
   'tesseract-data-eng: English OCR language data'
   'perl-image-exiftool: read embedded image description metadata'
   'at-spi2-core: speak text under the mouse cursor (hyprland-tts hover)'
+  'libnotify: desktop notifications when a keybind-triggered action fails silently'
 )
 makedepends=('make')
 
