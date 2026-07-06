@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=hyprland-tts Voices
+GenericName=Text-to-Speech Voice Manager
+Comment=Install and manage offline speech voices for hyprland-tts
+Exec=hyprland-tts-gui
+Icon=audio-speakers
+Terminal=false
+Categories=Utility;Accessibility;AudioVideo;
+Keywords=tts;speech;voice;accessibility;piper;
+StartupNotify=true

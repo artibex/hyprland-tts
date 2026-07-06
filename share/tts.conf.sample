@@ -1,0 +1,19 @@
+# ==============================================================================
+# hyprland-tts — Text-to-Speech keybinds (reference copy)
+# ------------------------------------------------------------------------------
+# `hyprland-tts setup` writes this file to ~/.config/hypr/tts.conf and adds
+#   source = ~/.config/hypr/tts.conf
+# to your hyprland.conf. You can edit the copy in ~/.config/hypr/tts.conf freely.
+# ==============================================================================
+
+# Core
+bind = SUPER, A, exec, hyprland-tts speak            # speak current selection
+bind = SUPER, ESCAPE, exec, hyprland-tts stop        # stop speech
+
+# Smart playback controls
+bind = SUPER ALT, right, exec, hyprland-tts ctl next     # next sentence
+bind = SUPER ALT, left,  exec, hyprland-tts ctl prev     # previous sentence
+bind = SUPER ALT, down,  exec, hyprland-tts ctl slower   # slow down
+bind = SUPER ALT, up,    exec, hyprland-tts ctl faster   # speed up
+bind = SUPER ALT, space, exec, hyprland-tts ctl toggle   # pause / resume
+bind = SUPER ALT, R,     exec, hyprland-tts ctl restart  # replay current sentence

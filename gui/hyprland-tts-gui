@@ -1,0 +1,347 @@
+#!/usr/bin/env python3
+# ==============================================================================
+# hyprland-tts-gui — graphical voice-model manager for hyprland-tts
+# ------------------------------------------------------------------------------
+# A thin, defensive GTK4 / libadwaita front end. It does NOT contain any TTS or
+# download logic itself: every action shells out to the `hyprland-tts` CLI
+# (`model list|catalog|install|install-url|remove|default`). The CLI is the
+# single source of truth (see Agent.md). This keeps the GUI simple, secure
+# (validation happens in the CLI), and robust (one code path to trust).
+# ==============================================================================
+import os
+import sys
+import shutil
+import threading
+import subprocess
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Gtk, Adw, GLib, Gio  # noqa: E402
+
+APP_ID = "com.github.artibex.hyprland_tts"
+CLI = os.environ.get("HYPRLAND_TTS_CLI", "hyprland-tts")
+
+
+def _resolve_cli():
+    """Find the hyprland-tts CLI (PATH, or sibling of this script in a checkout)."""
+    found = shutil.which(CLI)
+    if found:
+        return found
+    here = os.path.dirname(os.path.realpath(__file__))
+    for cand in (os.path.join(here, "..", "bin", "hyprland-tts"),):
+        cand = os.path.abspath(cand)
+        if os.access(cand, os.X_OK):
+            return cand
+    return None
+
+
+CLI_PATH = _resolve_cli()
+
+
+def run_cli(args, timeout=None):
+    """Run the CLI. Returns (rc, stdout, stderr). Never raises."""
+    if not CLI_PATH:
+        return (127, "", "hyprland-tts CLI not found in PATH")
+    try:
+        p = subprocess.run(
+            [CLI_PATH, *args],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        return (p.returncode, p.stdout, p.stderr)
+    except subprocess.TimeoutExpired:
+        return (124, "", "operation timed out")
+    except Exception as exc:  # pragma: no cover - defensive
+        return (1, "", str(exc))
+
+
+def human_size(nbytes):
+    try:
+        n = float(nbytes)
+    except (TypeError, ValueError):
+        return "?"
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} GB"
+
+
+class TtsWindow(Adw.ApplicationWindow):
+    def __init__(self, app):
+        super().__init__(application=app, title="hyprland-tts Voices")
+        self.set_default_size(560, 680)
+        self._busy = False
+
+        self.toasts = Adw.ToastOverlay()
+        self.set_content(self.toasts)
+
+        toolbar = Adw.ToolbarView()
+        self.toasts.set_child(toolbar)
+
+        header = Adw.HeaderBar()
+        toolbar.add_top_bar(header)
+
+        refresh = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Refresh")
+        refresh.connect("clicked", lambda _b: self.refresh())
+        header.pack_start(refresh)
+
+        add_url = Gtk.Button(icon_name="list-add-symbolic",
+                             tooltip_text="Install from custom URL")
+        add_url.connect("clicked", self.on_add_url)
+        header.pack_end(add_url)
+
+        self.spinner = Gtk.Spinner()
+        header.pack_end(self.spinner)
+
+        # scrollable content
+        scroller = Gtk.ScrolledWindow(vexpand=True)
+        toolbar.set_content(scroller)
+        self.clamp = Adw.Clamp(maximum_size=640, margin_top=12, margin_bottom=12,
+                               margin_start=12, margin_end=12)
+        scroller.set_child(self.clamp)
+
+        self.box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+        self.clamp.set_child(self.box)
+
+        if not CLI_PATH:
+            self._show_fatal("hyprland-tts CLI not found. Is the package installed?")
+            return
+
+        GLib.idle_add(self.refresh)
+
+    # -- helpers ---------------------------------------------------------------
+    def toast(self, text):
+        self.toasts.add_toast(Adw.Toast(title=text, timeout=3))
+
+    def set_busy(self, busy):
+        self._busy = busy
+        if busy:
+            self.spinner.start()
+        else:
+            self.spinner.stop()
+
+    def _show_fatal(self, msg):
+        status = Adw.StatusPage(
+            icon_name="dialog-error-symbolic",
+            title="Cannot start", description=msg)
+        self.box.append(status)
+
+    def _clear(self):
+        child = self.box.get_first_child()
+        while child:
+            nxt = child.get_next_sibling()
+            self.box.remove(child)
+            child = nxt
+
+    # -- data loading ----------------------------------------------------------
+    def refresh(self):
+        if not CLI_PATH:
+            return False
+        rc_i, out_i, err_i = run_cli(["model", "list", "--porcelain"], timeout=10)
+        rc_c, out_c, err_c = run_cli(["model", "catalog", "--porcelain"], timeout=10)
+        installed = self._parse_installed(out_i) if rc_i == 0 else []
+        catalog = self._parse_catalog(out_c) if rc_c == 0 else []
+        self._render(installed, catalog)
+        if rc_i != 0:
+            self.toast(err_i.strip() or "could not list installed voices")
+        return False
+
+    @staticmethod
+    def _parse_installed(text):
+        rows = []
+        for line in text.splitlines():
+            parts = line.split("\t")
+            if len(parts) != 6:
+                continue
+            vid, lang, name, size, is_def, is_last = parts
+            rows.append({
+                "id": vid, "lang": lang, "name": name, "size": size,
+                "default": is_def == "1", "last": is_last == "1",
+            })
+        return rows
+
+    @staticmethod
+    def _parse_catalog(text):
+        rows = []
+        for line in text.splitlines():
+            parts = line.split("\t")
+            if len(parts) != 6:
+                continue
+            key, lang, model, quality, installed, label = parts
+            rows.append({
+                "key": key, "lang": lang, "model": model, "quality": quality,
+                "installed": installed == "1", "label": label,
+            })
+        return rows
+
+    # -- rendering -------------------------------------------------------------
+    def _render(self, installed, catalog):
+        self._clear()
+
+        inst_group = Adw.PreferencesGroup(
+            title="Installed voices",
+            description="Voices available for speech. Set a per-language default or remove.")
+        self.box.append(inst_group)
+
+        if not installed:
+            empty = Adw.ActionRow(title="No voices installed yet",
+                                  subtitle="Install one from the list below.")
+            inst_group.add(empty)
+        for v in installed:
+            inst_group.add(self._installed_row(v))
+
+        cat_group = Adw.PreferencesGroup(
+            title="Available to download",
+            description="Curated neural voices from the Piper project (downloaded locally).")
+        self.box.append(cat_group)
+        for c in catalog:
+            cat_group.add(self._catalog_row(c))
+
+    def _installed_row(self, v):
+        subtitle_bits = [v["lang"].upper(), human_size(v["size"])]
+        if v["default"]:
+            subtitle_bits.append("default")
+        if v["last"]:
+            subtitle_bits.append("last used")
+        row = Adw.ActionRow(title=v["name"], subtitle=" · ".join(subtitle_bits))
+
+        if not v["default"]:
+            star = Gtk.Button(icon_name="starred-symbolic",
+                              tooltip_text=f"Make default for {v['lang'].upper()}",
+                              valign=Gtk.Align.CENTER)
+            star.add_css_class("flat")
+            star.connect("clicked", lambda _b, vid=v["id"]: self.on_set_default(vid))
+            row.add_suffix(star)
+
+        trash = Gtk.Button(icon_name="user-trash-symbolic",
+                           tooltip_text="Remove", valign=Gtk.Align.CENTER)
+        trash.add_css_class("flat")
+        trash.add_css_class("destructive-action")
+        trash.connect("clicked", lambda _b, vid=v["id"]: self.on_remove(vid))
+        row.add_suffix(trash)
+        return row
+
+    def _catalog_row(self, c):
+        row = Adw.ActionRow(title=c["label"],
+                            subtitle=f"{c['lang'].upper()} · {c['quality']} · {c['key']}")
+        if c["installed"]:
+            done = Gtk.Image.new_from_icon_name("emblem-ok-symbolic")
+            done.set_tooltip_text("Installed")
+            row.add_suffix(done)
+        else:
+            btn = Gtk.Button(label="Install", valign=Gtk.Align.CENTER)
+            btn.add_css_class("suggested-action")
+            btn.connect("clicked", lambda _b, key=c["key"]: self.on_install(key))
+            row.add_suffix(btn)
+        return row
+
+    # -- actions (run CLI in a worker thread so the UI never freezes) ----------
+    def _worker(self, args, ok_msg, timeout=None):
+        if self._busy:
+            self.toast("Please wait for the current operation to finish.")
+            return
+        self.set_busy(True)
+
+        def task():
+            rc, _out, err = run_cli(args, timeout=timeout)
+
+            def done():
+                self.set_busy(False)
+                if rc == 0:
+                    self.toast(ok_msg)
+                else:
+                    self.toast(err.strip().splitlines()[-1] if err.strip()
+                               else "operation failed")
+                self.refresh()
+                return False
+
+            GLib.idle_add(done)
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def on_install(self, key):
+        self.toast(f"Downloading {key}…")
+        self._worker(["model", "install", key], f"Installed {key}", timeout=600)
+
+    def on_set_default(self, vid):
+        self._worker(["model", "default", vid], f"Default set: {vid}", timeout=10)
+
+    def on_remove(self, vid):
+        dialog = Adw.MessageDialog(
+            transient_for=self, heading="Remove voice?",
+            body=f"Delete “{vid}” from disk? This cannot be undone.")
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("remove", "Remove")
+        dialog.set_response_appearance("remove", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.set_default_response("cancel")
+        dialog.connect("response", self._on_remove_response, vid)
+        dialog.present()
+
+    def _on_remove_response(self, dialog, response, vid):
+        if response == "remove":
+            self._worker(["model", "remove", vid], f"Removed {vid}", timeout=10)
+
+    def on_add_url(self, _btn):
+        dialog = Adw.MessageDialog(
+            transient_for=self, heading="Install from custom URL",
+            body="Provide a Hugging Face / direct link to a Piper .onnx model. "
+                 "The .onnx.json is fetched automatically if you leave it blank.")
+        grid = Gtk.Grid(row_spacing=8, column_spacing=8, margin_top=8)
+
+        lang_entry = Gtk.Entry(placeholder_text="lang code (e.g. it, pl)", max_length=3)
+        onnx_entry = Gtk.Entry(placeholder_text="https://…/voice.onnx", hexpand=True)
+        json_entry = Gtk.Entry(placeholder_text="https://…/voice.onnx.json (optional)",
+                               hexpand=True)
+        grid.attach(Gtk.Label(label="Language", halign=Gtk.Align.END), 0, 0, 1, 1)
+        grid.attach(lang_entry, 1, 0, 1, 1)
+        grid.attach(Gtk.Label(label="Model URL", halign=Gtk.Align.END), 0, 1, 1, 1)
+        grid.attach(onnx_entry, 1, 1, 1, 1)
+        grid.attach(Gtk.Label(label="JSON URL", halign=Gtk.Align.END), 0, 2, 1, 1)
+        grid.attach(json_entry, 1, 2, 1, 1)
+        dialog.set_extra_child(grid)
+
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("install", "Install")
+        dialog.set_response_appearance("install", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("install")
+        dialog.connect("response", self._on_add_url_response,
+                       lang_entry, onnx_entry, json_entry)
+        dialog.present()
+
+    def _on_add_url_response(self, dialog, response, lang_e, onnx_e, json_e):
+        if response != "install":
+            return
+        lang = lang_e.get_text().strip()
+        onnx = onnx_e.get_text().strip()
+        js = json_e.get_text().strip()
+        if not lang or not onnx:
+            self.toast("Language and model URL are required.")
+            return
+        args = ["model", "install-url", lang, onnx]
+        if js:
+            args.append(js)
+        self.toast("Downloading…")
+        self._worker(args, "Custom voice installed", timeout=600)
+
+
+class TtsApp(Adw.Application):
+    def __init__(self):
+        super().__init__(application_id=APP_ID,
+                         flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
+
+    def do_activate(self):
+        win = self.props.active_window
+        if not win:
+            win = TtsWindow(self)
+        win.present()
+
+
+def main():
+    app = TtsApp()
+    return app.run(sys.argv)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

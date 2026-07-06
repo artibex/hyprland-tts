@@ -1,0 +1,25 @@
+pkgbase = hyprland-tts
+	pkgdesc = Accessible, multilingual, offline Text-to-Speech for Hyprland (Piper) with smart playback controls and a voice manager
+	pkgver = 1.1.0
+	pkgrel = 1
+	url = https://github.com/artibex/hyprland-tts
+	arch = any
+	license = GPL3
+	makedepends = make
+	depends = bash
+	depends = piper-tts-bin
+	depends = wl-clipboard
+	depends = alsa-utils
+	depends = procps-ng
+	depends = curl
+	depends = gawk
+	depends = sed
+	depends = grep
+	optdepends = gtk4: graphical voice manager
+	optdepends = libadwaita: graphical voice manager
+	optdepends = python-gobject: graphical voice manager
+	optdepends = hyprland: target compositor for keybinds
+	source = hyprland-tts-1.1.0.tar.gz::https://github.com/artibex/hyprland-tts/archive/refs/tags/v1.1.0.tar.gz
+	sha256sums = SKIP
+
+pkgname = hyprland-tts
