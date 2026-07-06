@@ -22,10 +22,14 @@ cloud, no telemetry, no background daemons.
 - **Voiceover text cleanup** — prose is run through an optimizer that strips markdown,
   decorative symbol rows, and stray markup, and collapses the whitespace that otherwise
   causes long dead-air pauses — without changing the meaning. **Source code gets its own
-  cleanup**: it's auto-detected and read in a form meant for listening — operators become
-  words (`==` → "equals"), comment markers are stripped but the comment text is kept,
-  identifiers like `getUserName` are split into pronounceable words, and structural noise
-  (`{ } ( ) [ ] ;`) is turned into pauses or dropped instead of read aloud symbol-by-symbol.
+  cleanup**, auto-detected per paragraph (so one code snippet in an otherwise normal
+  document is handled correctly too): operators become words (`==` → "equals"), comment
+  markers are stripped but the comment text is kept, identifiers like `getUserName` are
+  split into pronounceable words, and structural noise (`{ } ( ) [ ] ;`) is turned into
+  pauses or dropped instead of read aloud symbol-by-symbol.
+- **Reliable on long documents** — playback won't stop or cut off partway through, even if
+  one part is slower to synthesize than the rest (this used to be a real bug: fixed by
+  driving mpv correctly instead of racing it).
 - **Reads copied images** *(optional)* — if you copy an image, it reads the embedded
   description (via exiftool) or the text inside it (via tesseract OCR). *(Web image
   alt-text can't be reached by a global tool — that lives in the browser DOM.)*
@@ -191,18 +195,20 @@ that. Both are fixed (the `.desktop` entry now goes through the same CLI wrapper
 GUI script self-corrects its interpreter either way); update to the latest package if
 you're still seeing this.
 
-**A shortcut (e.g. hover) seems to do nothing at all, even right after installing.** Before
-assuming something's broken: check what's *actually* bound, since a keybind can silently
-differ from the documented default (yours or an earlier customization):
+**A shortcut (e.g. hover) seems to do nothing at all, even right after installing.** Run:
 
 ```bash
-hyprland-tts keybind list          # what's really bound right now
+hyprland-tts keybind list          # what's really bound right now (also repairs it if
+                                    # it had drifted from what Hyprland actually has live)
 hyprland-tts keybind reset hover   # back to the SUPER+ALT+H default, if you want it
 ```
 
-No reboot or reinstall is needed for keybind changes — `hyprland-tts setup` (or any
-`keybind set`/`reset`) already reloads Hyprland for you. If a shortcut still does nothing
-and you have `libnotify` installed, hover will now pop a desktop notification when a real
+`keybind list` automatically fixes the shortcut config if it's ever out of sync with what
+Hyprland actually has bound (this used to be a real bug: editing the config file by hand
+instead of via `keybind`/the GUI could leave a shortcut silently stuck on an old key).
+No reboot or reinstall is ever needed for keybind changes — `hyprland-tts setup` (or any
+`keybind set`/`reset`/`list`) reloads Hyprland for you. If a shortcut still does nothing
+and you have `libnotify` installed, hover will pop a desktop notification when a real
 dependency (Hyprland, AT-SPI) is missing, instead of failing in total silence.
 
 ---

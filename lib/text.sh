@@ -10,12 +10,43 @@
 # player skips by). Long runs are wrapped at word boundaries.
 
 normalize_text() {
+  # Classify and normalize per PARAGRAPH (a blank-line-separated block), not
+  # the whole selection in one shot. A prose document with one embedded code
+  # snippet would otherwise have looks_like_code's verdict decided by the
+  # surrounding prose, leaving that snippet's braces/semicolons/parens
+  # completely unstripped — bad to listen to, and implicated in real reports
+  # of playback stopping partway through (an unusually slow-to-synthesize
+  # unstripped chunk gives mpv's playlist time to drain and go idle before
+  # the next chunk is appended; see the append-play fix in player.sh for the
+  # actual "stops" mechanism this made more likely to trigger).
   local input; input="$(cat)"
-  if looks_like_code "$input"; then
-    printf '%s' "$input" | normalize_code
-  else
-    printf '%s' "$input" | normalize_prose
-  fi
+
+  # Markdown code-fence marker lines (``` or ```lang) become blank lines:
+  # this removes the fence syntax from spoken output AND creates a paragraph
+  # boundary around the fenced content, so it's classified independently of
+  # the surrounding prose even if the source had no blank lines around it.
+  input="$(printf '%s\n' "$input" | sed -E 's/^[[:space:]]*```.*$//')"
+
+  local block cleaned out="" first=1
+  while IFS= read -r -d '' block; do
+    [ -n "${block//[[:space:]]/}" ] || continue
+    if looks_like_code "$block"; then
+      cleaned="$(printf '%s' "$block" | normalize_code)"
+    else
+      cleaned="$(printf '%s' "$block" | normalize_prose)"
+    fi
+    [ -n "${cleaned//[[:space:]]/}" ] || continue
+    if [ "$first" -eq 1 ]; then
+      out="$cleaned"; first=0
+    else
+      case "$out" in
+        *[.\!?:\;]) out="$out $cleaned" ;;   # already ends a clause — just a space
+        *)          out="$out. $cleaned" ;;
+      esac
+    fi
+  done < <(awk 'BEGIN{RS=""; ORS="\0"} {print}' <<< "$input")
+
+  printf '%s' "$out"
 }
 
 # ------------------------------------------------------------------------------

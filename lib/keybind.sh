@@ -71,6 +71,26 @@ cmd_keybind() {
   local sub="${1:-list}"; shift || true
   case "$sub" in
     list)
+      # Self-heal before reporting anything: tts.conf (what's actually LIVE
+      # in Hyprland) can drift from the config file (what this command is
+      # about to report as "current") whenever KEY_* lines are edited or
+      # removed by hand instead of via `keybind set/reset` — those are the
+      # only other callers that regenerate tts.conf. Confirmed for real: a
+      # config with no KEY_hover correctly reported the SUPER ALT, H default
+      # here, while the live Hyprland bind (and the on-disk tts.conf) was
+      # still the OLD "SUPER ALT, a" from before the line was removed by
+      # hand — this command was lying about what was actually bound. Cheap
+      # and idempotent to always regenerate; only reload Hyprland if the
+      # regenerated file actually changed, so a normal `keybind list` with
+      # nothing stale doesn't reload on every call.
+      local _before _after
+      _before="$(cat "$TTS_CONF" 2>/dev/null || true)"
+      generate_tts_conf
+      _after="$(cat "$TTS_CONF" 2>/dev/null || true)"
+      if [ "$_before" != "$_after" ]; then
+        have hyprctl && hyprctl reload >/dev/null 2>&1 || true
+      fi
+
       local porcelain=0; [ "${1:-}" = "--porcelain" ] && porcelain=1
       local a
       for a in "${ACTION_ORDER[@]}"; do

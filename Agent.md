@@ -59,11 +59,13 @@ The dispatcher resolves its lib dir from (in order) `$HYPRLAND_TTS_LIB`,
 
 `__daemon` starts **one mpv** in idle mode with an IPC socket
 (`--input-ipc-server`, `--audio-pitch-correction=yes`), renders each sentence **once** with
-Piper to a WAV, and `loadfile … append`s it to mpv's playlist. Controls are **native mpv
-IPC commands over the socket via `socat`** and are therefore instant and glitch-free:
+Piper to a WAV, and `loadfile … append-play`s it to mpv's playlist. Controls are **native
+mpv IPC commands over the socket via `socat`** and are therefore instant and glitch-free:
 `next/prev` = playlist-next/prev, `faster/slower` = set speed (pitch preserved), `pause/
 toggle` = set/cycle pause, `restart` = seek 0. The daemon quits mpv once everything is
-rendered and the playlist is drained.
+rendered AND mpv's own reported playlist-count confirms it has actually finished playing
+(see the `append-play`/`COUNTFILE` gotchas in §5 — both were real, confirmed-live bugs, not
+theoretical).
 
 > Why this design: the old `aplay` player re-ran Piper on every speed/skip action, and that
 > synthesis latency was the "painful stop" users hit. Rendering once + mpv playback removes
@@ -76,7 +78,8 @@ rendered and the playlist is drained.
 - Last-used `~/.local/state/piper-tts/last-model`
 - Config `~/.config/piper-tts/config` (sourced bash: `VOICE_<lang>`, `FALLBACK_VOICE`,
   `KEY_<action>`, `DEFAULT_SPEED`, `PIPER_BIN`, `MPV_BIN`)
-- Runtime `$XDG_RUNTIME_DIR/hyprland-tts/` (mpv.sock, daemon.pid, chunks, s*.wav, render.done)
+- Runtime `$XDG_RUNTIME_DIR/hyprland-tts/` (mpv.sock, daemon.pid, chunks, s*.wav, render.done,
+  render.count)
 - Hyprland `~/.config/hypr/tts.conf` (generated; sourced from `hyprland.conf`)
 
 ---
@@ -88,6 +91,21 @@ rendered and the playlist is drained.
   → English → any → error.
 - **Bug 2 (model manager, GUI + terminal)** — ✅ `model.sh` + GUI *Voices* tab.
 - **Smart playback (skip/replay/speed/pause)** — ✅ mpv IPC in `player.sh`. Instant.
+- **Playback stopping/cutting short mid-document (real-world fix)** — ✅ Two distinct real
+  bugs, both confirmed live against a real mpv instance, see the gotchas in §5:
+  `render_worker` now uses `append-play` instead of `append` (a plain append never resumes
+  playback if mpv already went idle, which happens whenever one chunk's synthesis takes
+  longer than playing everything queued so far — more likely for a slow/code-derived
+  chunk, but a risk on any sufficiently long document); and the daemon's "are we actually
+  done" check now waits for mpv's own `playlist-count` to match the true rendered total,
+  not just a single `idle-active` reading (which can be transiently stale right as the
+  last chunks are appended, cutting them off).
+- **Code-in-prose (real-world fix)** — ✅ `text.sh::normalize_text` now classifies and
+  normalizes **per paragraph** (blank-line-separated block; markdown fences count as
+  boundaries too) instead of the whole selection at once. Previously a big prose blob with
+  one embedded code snippet was classified as a whole, so the snippet's raw
+  `{ } ( ) ;` reached Piper completely unstripped — bad to listen to, and a likely
+  contributor to the slow/erratic synthesis timing behind the playback-stopping bug above.
 - **Voiceover text optimizer (prose)** — ✅ `text.sh::normalize_prose`: strips markdown
   (headings, emphasis `*`/`~~`, code fences, list/quote markers), turns links/emails/images
   into short spoken stand-ins (`(link)`, `(email)`, alt-text), drops decorative symbol rows,
@@ -159,20 +177,27 @@ rendered and the playlist is drained.
     and calling it from `cmd_hover`'s two dependency-missing paths — but deliberately
     **not** from the "no text found at this point" exit, since that's an expected, frequent
     outcome while moving the mouse around and would just be spam.
-  - **Keybind overrides can silently diverge from the documented defaults — check the
-    live config, don't assume the default is what's bound.** Confirmed for real: a user's
-    live `~/.config/piper-tts/config` had `KEY_hover=SUPER ALT, a` (not the default
-    `SUPER ALT, H`) alongside `KEY_speak=SUPER, a` — a deliberate-looking pairing (same
-    letter, ALT for the "alternate" action), most likely set via the GUI's Shortcuts tab
-    or `keybind set` at some point. The feature was fully installed, wired, and working
-    (`hyprctl binds -j` showed it live) — the user was almost certainly pressing the
-    *documented* default (`H`) instead of their own actual bound key (`A`). When a user
-    reports a keybind-triggered action "not working," **check `hyprland-tts keybind list`
-    (or `~/.config/piper-tts/config` for `KEY_*`) before assuming the code is broken** —
-    a config/documentation mismatch produces identical symptoms to a real bug (total
-    silence) and is much more common than it looks. Rebooting or reinstalling will not
-    fix this; only `hyprland-tts keybind list` (to see the truth) or `keybind reset`
-    (to restore defaults) will.
+  - **`tts.conf` (the generated, LIVE file) can drift from the config file `keybind list`
+    reads — and `keybind list` used to just lie when that happened (real bug, fixed).**
+    First diagnosed as "the user must have deliberately rebound hover to `SUPER ALT, a`,
+    pairing it with Speak's `A`" — `keybind list` reported the correct `SUPER ALT, H`
+    default (the config file had no `KEY_hover` override) and that looked like the whole
+    story. It wasn't: `hyprctl binds -j` and the on-disk `~/.config/hypr/tts.conf` still
+    showed the OLD `SUPER ALT, a` binding live, even though the config said default. Root
+    cause: only `keybind set`/`reset`/`setup` regenerate `tts.conf` — if a `KEY_*` line is
+    ever removed by hand (editing the config file directly, which looks like the obvious
+    thing to do and is not forbidden) instead of via `keybind reset`, the config file
+    correctly reverts to reporting the default, but the generated `tts.conf` — and
+    therefore the actual live Hyprland bind — silently keeps the stale value forever.
+    `keybind list` was reporting the config's belief, not the truth of what Hyprland
+    actually had bound, and there was no way to tell the two apart from its output. Fixed:
+    `cmd_keybind`'s `list` subcommand now regenerates `tts.conf` (and reloads Hyprland,
+    only if the content actually changed) *before* reporting anything, so what it prints
+    always matches what's actually live — self-healing on the exact command a confused
+    user would naturally run to check. **Lesson: don't stop at the first plausible
+    explanation that fits the evidence you happened to check first — `keybind list`
+    matching config was consistent with "deliberate rebind" but the live bind said
+    otherwise, and only checking `hyprctl binds -j` directly caught it.**
 
 ---
 
@@ -257,6 +282,49 @@ rendered and the playlist is drained.
   `Nameuser`, unpronounceable and confusing) — always `s/[()]/ /g` and let the whitespace
   tidy-up pass collapse runs. Caught in `normalize_code`; applies to any future text
   transform in `text.sh`.
+- **mpv's `loadfile … append` does not resume playback once mpv has gone idle — you need
+  `append-play`.** Confirmed empirically against a live mpv instance: after mpv drains its
+  playlist and reports `idle-active: true`, appending another file with plain `append`
+  raises `playlist-count` but `idle-active` and `playlist-pos` never change — the file
+  sits queued and is never played, silently, forever. `append-play` fixes this
+  unconditionally (and behaves exactly like `replace` on an empty/fresh playlist, so it's
+  safe to use for every chunk, no first-chunk special case needed). This was the real
+  mechanism behind two user reports — "audio just stops" (more likely when one chunk is
+  unusually slow to synthesize, giving mpv time to drain and go idle before the next
+  append) and "sometimes cut short" (the same race from ordinary timing variance on a long
+  document) — and it does **not** reproduce on short test inputs where synthesis always
+  outpaces playback, so a quick manual smoke test alone won't catch it; you need a
+  deliberately slow-to-render chunk to force the race (see `render_worker`'s comment for
+  a reproducible harness sketch).
+- **A `DONEFILE`-exists-plus-one-`idle-active`-reading "are we done" check is racy — verify
+  against mpv's own count, not a single timing-sensitive read.** `render_worker` touches
+  its done-marker the instant it has *issued* its last `append-play` IPC call, which is
+  not the same moment mpv has *processed* it; a monitor-loop poll landing in that gap can
+  see a stale `idle-active: true` left over from the previous chunk and quit mpv before
+  the last chunk(s) actually play. Fixed by having `render_worker` also record how many
+  chunks it appended (`COUNTFILE`) and having the monitor loop require mpv's own
+  `playlist-count` to reach that number, in addition to `idle-active` — a premature poll
+  just sees a lower count and correctly keeps waiting, instead of trusting a snapshot that
+  might be stale. General principle: when two processes coordinate via "the other one
+  finished," prefer a condition the OTHER side reports about its own real state over one
+  your side merely infers from a single timing-dependent read.
+- **Verify `set -e` suspicions empirically, don't just flag them.** While investigating
+  the above, `mode="append"; [ "$idx" -eq 0 ] && mode="replace"` looked like a classic
+  `set -e`-plus-`&&`-list footgun (a standalone `A && B` where `A` fails would seem to
+  exit the whole function under `set -e`). Tested it in isolation before "fixing" it:
+  bash exempts every command in an `&&`/`||` list except the last one from triggering
+  `-e`, so this specific pattern was never actually broken — the real bugs were the two
+  mpv issues above. Don't spend a fix on a plausible-looking gotcha without confirming it
+  reproduces; a wrong diagnosis here would have masked the real bug.
+- **Testing `run_daemon`/`speak_text` for real spawns real mpv, which opens a real audio
+  device by default — `run_daemon` never passes `--ao=null`.** Even fake, silent WAV
+  content still opens a genuine PipeWire/ALSA stream. Confirmed while debugging: running
+  the actual daemon repeatedly without muting it caused mpv to become unresponsive to its
+  own IPC socket, most likely from multiple leftover test instances contending for the
+  audio device — a test-environment artifact that looked exactly like a logic bug until
+  isolated. When testing this path, wrap `mpv` in a fakebin script that injects `--ao=null`
+  before invoking the real binary — keeps real mpv IPC/playlist semantics (unlike a fully
+  fake `mpv`) while never touching audio hardware or a live user's speakers.
 - **XDG compliance**; **idempotent** setup (2× setup → 1 source line; uninstall → 0 refs).
 - **Keep core shortcuts as defaults** (`SUPER+A`, `SUPER+ESCAPE`); playback controls default
   to `SUPER+ALT+…`. All are user-rebindable via `keybind`.
@@ -280,8 +348,18 @@ scratch `$HOME` and fakes on `PATH`. Status of what's been exercised:
   detected beats fallback beats last-used; fallback cleared on model removal. *(Verified.)*
 - **Keybind** — modmask math, combo split, `tts.conf` generation, and conflict detection
   against a fake `hyprctl binds -j` (blocks; `--force` overrides). *(Verified.)*
-- **mpv player** — **real mpv + socat + fake Piper WAVs**: speak → next/prev (instant),
-  faster/slower (live speed 1.2/0.8, no restart), pause/resume, stop → clean, no orphans. *(Verified.)*
+- **mpv player** — **real mpv (via a `--ao=null`-injecting fakebin wrapper — see the audio
+  gotcha in §5) + socat + fake Piper WAVs**: speak → next/prev (instant), faster/slower
+  (live speed 1.2/0.8, no restart), pause/resume, stop → clean, no orphans. *(Verified.)*
+- **`append-play` fix + `COUNTFILE` completion check** — reproduced the actual bug with a
+  fake Piper that deliberately sleeps 2.5s on one chunk out of three, and an authoritative
+  timestamped log of real synthesis start/end times cross-referenced against `ctl status`
+  polls every 0.3s: confirmed mpv correctly stays idle (not stuck) through the slow
+  chunk's synthesis, then resumes and plays the remaining chunks once they're appended,
+  and the daemon only reports done once mpv's real `playlist-count` reaches the true
+  total. Also confirmed the normal fast-path (no artificial delay) and all `ctl` commands
+  are unaffected. *(Verified — this is the actual fix for two user-reported bugs, not
+  speculative; see §5 for the two gotchas this uncovered.)*
 - **Model commands** — catalog/list/porcelain (now 7 fields incl. fallback)/default/
   fallback (set/clear/show)/remove + URL security (rejects non-https/traversal/wrong-
   extension). *(Verified.)*
@@ -319,6 +397,18 @@ overriding `$XDG_RUNTIME_DIR` for an unrelated test, which hides the real Waylan
 GTK, not from the environment being genuinely headless. Don't assume "no display" without
 checking `hyprctl monitors` / `$WAYLAND_DISPLAY` first — and don't override `$XDG_RUNTIME_DIR`
 in a test without restoring it, since that variable is also how GTK finds the compositor.
+
+- **Keybind self-heal** — simulated the exact drift bug live: generated `tts.conf` via
+  `setup`, hand-edited it to reintroduce a stale binding (bypassing `keybind set/reset`,
+  exactly how the real bug occurred), then confirmed `keybind list` detects the
+  difference, regenerates `tts.conf` correctly, and reports the true (now-fixed) value.
+  *(Verified — also applied directly against the real reporting user's live system to fix
+  their actual stuck `hover` binding, confirmed via `hyprctl binds -j` before and after.)*
+- **Mixed prose+code normalization** — pure prose, pure code (JS-brace and Python-`#`
+  styles), a prose paragraph with an embedded code snippet (no blank lines needed —
+  markdown fences count as boundaries too) all produce clean output with the code portion
+  properly normalized regardless of the surrounding text's classification, and no
+  double-punctuation at paragraph joins. *(Verified.)*
 
 Not yet run: clean-chroot `makepkg` + `namcap`; an actual interactive GUI click-through.
 

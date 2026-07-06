@@ -12,13 +12,14 @@
 # The daemon's only jobs are: render sentences, feed them to mpv, and quit mpv
 # when the playlist is exhausted.
 
-MPV_SOCK="" ; PIDFILE="" ; CHUNKFILE="" ; MODELFILE="" ; DONEFILE=""
+MPV_SOCK="" ; PIDFILE="" ; CHUNKFILE="" ; MODELFILE="" ; DONEFILE="" ; COUNTFILE=""
 _player_paths() {
   MPV_SOCK="$RUN_DIR/mpv.sock"
   PIDFILE="$RUN_DIR/daemon.pid"
   CHUNKFILE="$RUN_DIR/chunks"
   MODELFILE="$RUN_DIR/model"
   DONEFILE="$RUN_DIR/render.done"
+  COUNTFILE="$RUN_DIR/render.count"
 }
 
 daemon_alive() {
@@ -131,27 +132,75 @@ run_daemon() {
   render_worker "$model" &
   render_pid=$!
 
-  # monitor: once everything is rendered and mpv has drained the playlist, quit
+  # Monitor: quit mpv once everything is rendered AND actually finished playing.
+  #
+  # Deliberately NOT just "DONEFILE exists and idle-active is true right now":
+  # render_worker touches DONEFILE the instant it has ISSUED its last
+  # append-play IPC call, which is not the same moment mpv has PROCESSED it.
+  # A poll landing in that gap could see a stale idle-active=true (from the
+  # tail end of the previous chunk) and quit mpv before the last chunk(s)
+  # actually play — cutting playback short. Confirmed real via a fake-Piper
+  # test with one deliberately slow chunk: the daemon reported fully idle
+  # only ~0.3s after two chunks were appended in a burst, far too fast for
+  # both to have actually played.
+  #
+  # Fix: track the number of chunks render_worker actually appended
+  # (COUNTFILE, written alongside DONEFILE) and require mpv's OWN reported
+  # playlist-count to match it, in addition to idle-active. playlist-count
+  # only advances once mpv has genuinely processed an append, so this can't
+  # be fooled by IPC delivery lag the way a bare idle-active check can — a
+  # premature poll just sees a lower count and correctly keeps waiting.
   while kill -0 "$mpv_pid" 2>/dev/null; do
     if [ -f "$DONEFILE" ]; then
-      [ "$(mpv_get idle-active)" = "true" ] && { mpv_ipc '{"command":["quit"]}' >/dev/null; break; }
+      local total have
+      total="$(cat "$COUNTFILE" 2>/dev/null || true)"
+      have="$(mpv_get playlist-count)"
+      if [ -n "$total" ] && [ "$have" = "$total" ] && [ "$(mpv_get idle-active)" = "true" ]; then
+        mpv_ipc '{"command":["quit"]}' >/dev/null
+        break
+      fi
     fi
     sleep 0.3
   done
 }
 
 render_worker() {
-  local model="$1" idx=0 wav mode line
+  # Rendering (this loop) and playback (mpv) run concurrently: mpv starts
+  # playing chunk 0 as soon as it's appended, while we're still synthesizing
+  # chunk 1, 2, ... Whenever synthesis of one chunk takes longer than
+  # playback of everything queued so far — a plausible slowdown for a long
+  # document, a slow disk, or a longer chunk from code normalization — mpv
+  # DRAINS ITS PLAYLIST AND GOES IDLE before the next chunk is appended.
+  #
+  # Plain `append` (the mode this used to use for every chunk after the
+  # first) only adds to the playlist — it does NOT resume playback if mpv is
+  # already idle. Confirmed empirically against a live mpv instance: once
+  # idle, `loadfile x append` leaves idle-active=true and playlist-pos=-1
+  # forever, i.e. the file is queued but never played. That is the exact
+  # mechanism behind two real user reports: "audio just stops" (more likely
+  # whenever a chunk is unusually slow to synthesize, e.g. a code-derived
+  # chunk) and "sometimes cut short" (the same race, triggered by ordinary
+  # timing variance on any long document) — not something that shows up on
+  # short test inputs where synthesis always outpaces playback.
+  #
+  # `append-play` fixes this unconditionally: it starts playback if mpv is
+  # idle, and behaves exactly like `replace` on an empty playlist (verified),
+  # so there's no need for a separate first-chunk case anymore either.
+  local model="$1" idx=0 wav line
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     wav="$RUN_DIR/s$(printf '%05d' "$idx").wav"
     if printf '%s' "$line" | "$PIPER_BIN" --model "$model" --output_file "$wav" >/dev/null 2>&1 \
        && [ -s "$wav" ]; then
-      mode="append"; [ "$idx" -eq 0 ] && mode="replace"
-      mpv_ipc "{\"command\":[\"loadfile\",\"$wav\",\"$mode\"]}" >/dev/null
+      mpv_ipc "{\"command\":[\"loadfile\",\"$wav\",\"append-play\"]}" >/dev/null
       idx=$((idx+1))
     fi
   done < "$CHUNKFILE"
+  # record how many chunks actually got appended (a chunk whose synthesis
+  # failed is skipped, so this can be less than the line count) — the
+  # monitor loop waits for mpv's own playlist-count to reach this number
+  # before it's allowed to quit; see the comment there for why.
+  printf '%s\n' "$idx" > "$COUNTFILE"
   touch "$DONEFILE"
 }
 
