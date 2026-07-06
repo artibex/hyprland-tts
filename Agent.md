@@ -39,13 +39,14 @@ CLI. Never duplicate logic into a skin — add a subcommand/flag and call it.
 | Module | Responsibility |
 | --- | --- |
 | `common.sh` | XDG paths, tunables, config read/write, the **keybind action table** (`ACTION_*`), helpers (`log`/`die`/`have`). |
-| `text.sh` | `normalize_text` (voiceover optimizer) + `chunk_text` (sentence splitting). |
-| `router.sh` | `detect_lang` + `resolve_model` (last-used fallback) + `remember_model`. |
-| `model.sh` | Voice catalog + install / list / catalog / remove / default (+ all download security). |
+| `text.sh` | `normalize_text` dispatches to `normalize_prose` or `normalize_code` (via `looks_like_code`), + `chunk_text` (sentence splitting). |
+| `router.sh` | `detect_lang` + `resolve_model` (fallback-voice + last-used) + `remember_model`. |
+| `model.sh` | Voice catalog + install / list / catalog / remove / default / **fallback** (+ all download security). |
 | `image.sh` | `read_clipboard_image` — exiftool metadata → tesseract OCR, graceful. |
 | `keybind.sh` | Generate `tts.conf` from the action table; `keybind list/set/check/reset`; conflict detection via `hyprctl binds -j`. |
-| `player.sh` | mpv-based smart player: `cmd_speak`, `run_daemon`, `render_worker`, `cmd_ctl`, `cmd_stop`. |
+| `player.sh` | mpv-based smart player: `cmd_speak`, `speak_text` (shared with `hover`), `run_daemon`, `render_worker`, `cmd_ctl`, `cmd_stop`. |
 | `setup.sh` | Idempotent Hyprland wiring: `setup` / `uninstall` / `purge`. |
+| `hover.sh` | `cmd_hover` — on-demand "speak text under the cursor" via `hyprctl cursorpos` + AT-SPI (`hover-read.py`, a non-sourced Python helper installed alongside the `lib/*.sh` modules). |
 
 The dispatcher resolves its lib dir from (in order) `$HYPRLAND_TTS_LIB`,
 `<self>/../lib/hyprland-tts` (installed), `<self>/../lib` (git checkout),
@@ -73,7 +74,8 @@ rendered and the playlist is drained.
 
 - Models `~/.local/share/piper-tts/<lang>/<model>.onnx` (+ `.onnx.json`)
 - Last-used `~/.local/state/piper-tts/last-model`
-- Config `~/.config/piper-tts/config` (sourced bash: `VOICE_<lang>`, `KEY_<action>`, `DEFAULT_SPEED`, `PIPER_BIN`, `MPV_BIN`)
+- Config `~/.config/piper-tts/config` (sourced bash: `VOICE_<lang>`, `FALLBACK_VOICE`,
+  `KEY_<action>`, `DEFAULT_SPEED`, `PIPER_BIN`, `MPV_BIN`)
 - Runtime `$XDG_RUNTIME_DIR/hyprland-tts/` (mpv.sock, daemon.pid, chunks, s*.wav, render.done)
 - Hyprland `~/.config/hypr/tts.conf` (generated; sourced from `hyprland.conf`)
 
@@ -82,14 +84,33 @@ rendered and the playlist is drained.
 ## 3. Feature status
 
 - **Bug 1 (undetected language → last-used model)** — ✅ `router.sh::resolve_model`.
-  Order: detected (DE→FR→ES→EN) → last-used (if file exists) → English → any → error.
+  Order: detected (DE→FR→ES→EN) → **explicit fallback voice** → last-used (if file exists)
+  → English → any → error.
 - **Bug 2 (model manager, GUI + terminal)** — ✅ `model.sh` + GUI *Voices* tab.
 - **Smart playback (skip/replay/speed/pause)** — ✅ mpv IPC in `player.sh`. Instant.
-- **Voiceover text optimizer** — ✅ `text.sh::normalize_text`: strips markdown (headings,
-  emphasis `*`/`~~`, code fences, list/quote markers), turns links/emails/images into short
-  spoken stand-ins (`(link)`, `(email)`, alt-text), drops decorative symbol rows, converts
-  table pipes to pauses, and collapses whitespace/blank-line runs into single sentence
-  breaks — **meaning preserved** (leaves `snake_case` and accents intact).
+- **Voiceover text optimizer (prose)** — ✅ `text.sh::normalize_prose`: strips markdown
+  (headings, emphasis `*`/`~~`, code fences, list/quote markers), turns links/emails/images
+  into short spoken stand-ins (`(link)`, `(email)`, alt-text), drops decorative symbol rows,
+  converts table pipes to pauses, and collapses whitespace/blank-line runs into single
+  sentence breaks — **meaning preserved** (leaves `snake_case` and accents intact).
+- **Voiceover text optimizer (code)** — ✅ `text.sh::looks_like_code` + `normalize_code`.
+  `normalize_text` scores 4 independent signals (symbol density, keywords, indented-line
+  count, camelCase/snake_case identifiers) and routes to `normalize_code` when ≥2 agree.
+  `normalize_code` translates meaningful operators to words (`==`→"equals", `&&`→"and",
+  `=>`/`->`→"arrow", etc.), strips comment *markers* while keeping comment *text* (`//`,
+  `#`, `/* */`), splits camelCase/snake_case identifiers into pronounceable words, turns
+  `{ } ;` into silent sentence breaks instead of reading them aloud, and drops `() [ ]`
+  by replacing with a space (not nothing — a straight delete glues adjacent tokens
+  together, e.g. `getName(user)` → `Nameuser`; this bit us during testing, see §5 gotcha).
+  A final pass drops lines that are only periods/whitespace (e.g. a lone `}` that became
+  `.`) so playback doesn't speak empty sentences. Best-effort heuristic, not a parser —
+  documented as such in the code; doesn't understand strings-that-look-like-comments or
+  describe control flow.
+- **Fallback voice (GUI + CLI)** — ✅ `model.sh::cmd_model fallback` (`set` / `--clear` /
+  show-current) + GUI *Voices* tab "Fallback voice" group and a "Fallback" button per
+  installed voice. Stored as `FALLBACK_VOICE` in the config file; takes priority over the
+  automatic last-used heuristic in `resolve_model` since it's a deliberate user choice;
+  cleared automatically if that model is removed (same as `default`).
 - **Rebind + conflict detection** — ✅ `keybind.sh` + GUI *Shortcuts* tab (press-to-capture,
   warns on clash via `hyprctl binds -j`).
 - **Image reading** — ✅ `image.sh` (exiftool description → tesseract OCR), optional deps,
@@ -99,6 +120,35 @@ rendered and the playlist is drained.
   no longer trusts a bare `python3`; see the gotcha in §5 for the exact failure it fixes.
 - **Root/sudo guard (real-world fix)** — ✅ `refuse_root()` blocks every subcommand under
   root, in both the dispatcher and the GUI; see the gotcha in §5.
+- **Hover: speak text under the cursor** — ✅ `hover.sh::cmd_hover` + `hover-read.py`,
+  bound to `SUPER ALT, H` by default. **Deliberately on-demand, one AT-SPI query per
+  keypress — not continuous hover polling**, because true continuous hover needs a
+  permanent background daemon watching pointer position, which conflicts with this
+  project's "no background daemons" principle (see §1 Mission). This was an explicit
+  scope decision asked of the user, not assumed — see the options in the PR/session that
+  added this feature if you need the reasoning restated.
+  - Cursor position comes from `hyprctl cursorpos` — Hyprland-specific; this action only
+    works under Hyprland (matches the rest of the project's scope).
+  - Text comes from AT-SPI (the same accessibility framework Orca's "Mouse Review" uses):
+    only works in apps that implement it. Confirmed working live against GTK apps
+    (Mousepad, Nautilus). **Electron apps (VS Code, Discord, Slack, etc.) commonly don't
+    register with AT-SPI at all** unless the app has had accessibility explicitly enabled
+    — confirmed live: the actual focused window (`code`) was simply absent from AT-SPI's
+    application list. Terminals and games are similarly invisible to it. This is a hard
+    ceiling on coverage, not a bug to chase.
+  - AT-SPI has no concept of window stacking order, and occluded/background windows keep
+    reporting their old geometry — without help, a hidden app's node can shadow the really
+    visible one at the same screen point (confirmed live: a background file manager's
+    sidebar was returned instead of the focused editor's text). Fixed by passing the
+    *actually focused* window's class (`hyprctl activewindow -j`, grep'd for `"class"`) as
+    a hint that `hover-read.py` checks first, falling back to a full scan if that app isn't
+    AT-SPI-registered.
+  - Hard-bounded by a shell `timeout` around the whole Python call (currently 1.5s) so a
+    stuck/missing AT-SPI registry degrades to silence, never a hang.
+  - **Privacy note:** this command reads whatever text is actually on screen at the cursor,
+    including in other people's open documents/messages if the pointer happens to be there.
+    That's inherent to what the feature does (same as it would be for any screen reader),
+    not a bug — but worth being upfront about in the README, which it now is.
 
 ---
 
@@ -113,8 +163,10 @@ rendered and the playlist is drained.
   at publish time; then regenerate `.SRCINFO` with `makepkg --printsrcinfo > .SRCINFO`.
 - `depends`: `bash piper-tts-bin wl-clipboard mpv socat procps-ng curl gawk sed grep gtk4
   libadwaita python-gobject`. `optdepends`: `hyprland`, `tesseract`(+`-data-eng`),
-  `perl-image-exiftool`. (GTK stack is a hard dep so `hyprland-tts gui` always works;
-  `alsa-utils` was dropped when playback moved to mpv.)
+  `perl-image-exiftool`, `at-spi2-core` (for `hover`). (GTK stack is a hard dep so
+  `hyprland-tts gui` always works; `alsa-utils` was dropped when playback moved to mpv.)
+- `hover-read.py` installs alongside the `lib/*.sh` modules (`$LIBDIR/hover-read.py`,
+  mode 755 — it's executed directly by `hover.sh`, not sourced like the `.sh` files).
 - Per-user wiring is `hyprland-tts setup`, never the package. `purge` removes user data.
 
 ---
@@ -150,6 +202,25 @@ rendered and the playlist is drained.
   binary directly) blocks every subcommand under root with a message pointing at the real
   fix, before touching GTK/Wayland at all. Escape hatch: `HYPRLAND_TTS_ALLOW_ROOT=1` (not
   documented for normal use — packaging/CI only).
+- **AT-SPI's tree structure follows widget hierarchy, not visual containment — do not
+  prune a search by "does this node's bounds contain the point."** A GTK notebook's
+  "page tab" accessible reports only the tiny tab-*label* rectangle; its actual page
+  content is a child with much larger, geometrically unrelated screen bounds. Pruning a
+  point-search when a parent's bounds don't contain the point silently skips real,
+  correctly-nested content — caught by testing `hover-read.py` against a live GTK app.
+  Walk the whole (bounded) subtree instead and pick the best match by its own bounds.
+- **This GI/Atspi binding's `Text.get_text()` is not what it looks like.** Calling it as
+  a bound method — `iface.get_text(start, end)` — raises `takes exactly 1 argument (3
+  given)` and gets silently swallowed by any `except Exception`, so every real text node
+  quietly contributes nothing. The working form is the static/free function:
+  `Atspi.Text.get_text(iface, 0, -1)`. This one cost real debugging time against a live
+  desktop — confirm empirically before trusting a GI method's signature from memory,
+  it can differ from the C API docs.
+- **When stripping structural characters from spoken text, replace with a space, not
+  nothing.** A bare `s/[()]//g` glues adjacent tokens together (`getName(user)` →
+  `Nameuser`, unpronounceable and confusing) — always `s/[()]/ /g` and let the whitespace
+  tidy-up pass collapse runs. Caught in `normalize_code`; applies to any future text
+  transform in `text.sh`.
 - **XDG compliance**; **idempotent** setup (2× setup → 1 source line; uninstall → 0 refs).
 - **Keep core shortcuts as defaults** (`SUPER+A`, `SUPER+ESCAPE`); playback controls default
   to `SUPER+ALT+…`. All are user-rebindable via `keybind`.
@@ -162,19 +233,28 @@ rendered and the playlist is drained.
 `make check` runs `bash -n` on the dispatcher + `py_compile` on the GUI. Manual checks use a
 scratch `$HOME` and fakes on `PATH`. Status of what's been exercised:
 
-- **Text optimizer** — markdown/URL/email/table/symbol-row/blank-line cases; accents and
-  `snake_case` preserved; no double periods / leading commas. *(Verified.)*
-- **Router** — DE/FR/ES/EN detection; ambiguous → last-used; detected beats last-used. *(Verified.)*
+- **Text optimizer (prose)** — markdown/URL/email/table/symbol-row/blank-line cases; accents
+  and `snake_case` preserved; no double periods / leading commas. *(Verified.)*
+- **Text optimizer (code)** — `looks_like_code` correctly classifies a JS-style snippet as
+  code and plain prose as prose; `normalize_code` on a JS function and a Python function
+  (braces vs. `#`/indentation) both produce clean, chunk-able sentences with no glued
+  tokens and no stray empty-period lines; `**kwargs` isn't mistaken for markdown emphasis
+  (that stripping only happens in `normalize_prose`). *(Verified.)*
+- **Router** — DE/FR/ES/EN detection; ambiguous → fallback voice (if set) → last-used;
+  detected beats fallback beats last-used; fallback cleared on model removal. *(Verified.)*
 - **Keybind** — modmask math, combo split, `tts.conf` generation, and conflict detection
   against a fake `hyprctl binds -j` (blocks; `--force` overrides). *(Verified.)*
 - **mpv player** — **real mpv + socat + fake Piper WAVs**: speak → next/prev (instant),
   faster/slower (live speed 1.2/0.8, no restart), pause/resume, stop → clean, no orphans. *(Verified.)*
-- **Model commands** — catalog/list/porcelain/default/remove + URL security (rejects
-  non-https/traversal/wrong-extension). *(Verified.)*
+- **Model commands** — catalog/list/porcelain (now 7 fields incl. fallback)/default/
+  fallback (set/clear/show)/remove + URL security (rejects non-https/traversal/wrong-
+  extension). *(Verified.)*
 - **Setup/uninstall** — idempotent wiring round-trip. *(Verified.)*
 - **Packaging** — `make install` layout (incl. `lib/`), and a real `makepkg` build. *(Verified.)*
-- **GUI** — `py_compile` + graceful no-GTK message. **Not launched on the dev box** (no
-  PyGObject there); smoke-test on a real GTK4 desktop: Voices (install/remove/default),
+- **GUI** — `py_compile` + graceful no-GTK message. Not interactively clicked-through this
+  session (the dev box turned out to have a live Hyprland desktop — see below — but
+  popping a window on someone's live session mid-debugging wasn't the moment for it).
+  Still needs a real interactive smoke-test: Voices (install/remove/default/fallback),
   Shortcuts (press-to-rebind, conflict dialog), custom-URL, failure paths → toast, no crash.
 - **Image reading** — logic only; needs a live Wayland clipboard to exercise end-to-end.
 - **GUI python3 resolution** — reproduced the exact failure on the dev box itself (its
@@ -185,9 +265,26 @@ scratch `$HOME` and fakes on `PATH`. Status of what's been exercised:
 - **Root guard** — faked `id -u` → `0` on `PATH`; confirmed `gui`/`model`/`setup` all refuse
   cleanly before touching GTK/Wayland, real (non-root) invocations are unaffected, and
   `HYPRLAND_TTS_ALLOW_ROOT=1` bypasses it. *(Verified.)*
+- **Hover** — **tested against a real, live Hyprland + AT-SPI desktop**, not just fakes:
+  `hyprctl cursorpos`/`activewindow` parsing; real query against Mousepad and Nautilus
+  (found real file content, not just widget names); the two real bugs this surfaced (child
+  bounds not nested in parent bounds; `Text.get_text()`'s actual calling convention) — both
+  documented as gotchas in §5 and fixed; graceful silent fallback confirmed for an
+  AT-SPI-unregistered focused app (VS Code) and for `hyprctl`/AT-SPI entirely absent.
+  Did **not** exercise the final `speak_text` handoff live (would have synthesized and
+  played the real (and in one case personal/sensitive) on-screen text through the user's
+  speakers mid-debugging) — that leg of the pipeline is the same `speak_text` already
+  covered by the mpv player tests above, just fed a different text source.
 
-Not yet run: clean-chroot `makepkg` + `namcap`; real audio on a Hyprland session; the GUI
-has still never been shown on an actual display (this dev box is headless).
+Correction to an earlier assumption in this file: the dev box used for prior sessions turned
+out to have a **live Hyprland/Wayland session** reachable the whole time (`hyprctl` worked,
+AT-SPI was running) — the earlier GTK launch failures were most likely from this agent
+overriding `$XDG_RUNTIME_DIR` for an unrelated test, which hides the real Wayland socket from
+GTK, not from the environment being genuinely headless. Don't assume "no display" without
+checking `hyprctl monitors` / `$WAYLAND_DISPLAY` first — and don't override `$XDG_RUNTIME_DIR`
+in a test without restoring it, since that variable is also how GTK finds the compositor.
+
+Not yet run: clean-chroot `makepkg` + `namcap`; an actual interactive GUI click-through.
 
 ---
 
@@ -212,8 +309,9 @@ hyprland-tts/
 ├── Makefile                         # install static assets (PREFIX/DESTDIR)
 ├── bin/hyprland-tts                 # thin dispatcher (resolves lib/, dispatches subcommands)
 ├── lib/                             # THE LOGIC
-│   ├── common.sh  text.sh  router.sh  model.sh
-│   └── image.sh   keybind.sh player.sh  setup.sh
+│   ├── common.sh  text.sh   router.sh  model.sh
+│   ├── image.sh   keybind.sh player.sh  setup.sh
+│   └── hover.sh   hover-read.py     # on-demand cursor read (AT-SPI; not sourced, exec'd)
 ├── gui/hyprland-tts-gui             # GTK4/libadwaita: Voices + Shortcuts (thin CLI front end)
 ├── share/
 │   ├── applications/hyprland-tts.desktop

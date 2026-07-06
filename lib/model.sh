@@ -55,7 +55,7 @@ cmd_model() {
       local porcelain=0; [ "${1:-}" = "--porcelain" ] && porcelain=1
       local last=""; [ -f "$LAST_MODEL_FILE" ] && last="$(cat "$LAST_MODEL_FILE" 2>/dev/null || true)"
       [ -d "$MODELS_DIR" ] || { [ "$porcelain" -eq 1 ] || echo "No models installed."; return 0; }
-      local found=0 f lang name size isdef islast defvar
+      local found=0 f lang name size isdef islast isfb defvar
       while IFS= read -r f; do
         [ -n "$f" ] || continue
         found=1
@@ -63,10 +63,13 @@ cmd_model() {
         size="$(stat -c%s "$f" 2>/dev/null || echo 0)"
         defvar="VOICE_${lang}"; isdef=0; [ "${!defvar:-}" = "$f" ] && isdef=1
         islast=0; [ "$f" = "$last" ] && islast=1
+        isfb=0; [ -n "${FALLBACK_VOICE:-}" ] && [ "$f" = "$FALLBACK_VOICE" ] && isfb=1
         if [ "$porcelain" -eq 1 ]; then
-          printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$lang/$name" "$lang" "$name" "$size" "$isdef" "$islast"
+          printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$lang/$name" "$lang" "$name" "$size" "$isdef" "$islast" "$isfb"
         else
-          local marks=""; [ "$isdef" -eq 1 ] && marks="$marks [default]"; [ "$islast" -eq 1 ] && marks="$marks [last used]"
+          local marks=""; [ "$isdef" -eq 1 ] && marks="$marks [default]"
+          [ "$isfb" -eq 1 ] && marks="$marks [fallback]"
+          [ "$islast" -eq 1 ] && marks="$marks [last used]"
           printf '  %-8s %-28s %6s MB%s\n' "$lang" "$name" \
             "$(awk -v b="$size" 'BEGIN{printf "%.1f", b/1048576}')" "$marks"
         fi
@@ -111,6 +114,7 @@ cmd_model() {
       f="$MODELS_DIR/$lang/$name.onnx"; [ -f "$f" ] || die "no such model: $id"
       rm -f "$f" "${f}.json"; log "Removed: $id"
       local defvar="VOICE_${lang}"; [ "${!defvar:-}" = "$f" ] && unset_config_var "$defvar"
+      [ -n "${FALLBACK_VOICE:-}" ] && [ "$FALLBACK_VOICE" = "$f" ] && unset_config_var "FALLBACK_VOICE"
       [ -f "$LAST_MODEL_FILE" ] && [ "$(cat "$LAST_MODEL_FILE" 2>/dev/null)" = "$f" ] && rm -f "$LAST_MODEL_FILE"
       rmdir "$MODELS_DIR/$lang" 2>/dev/null || true ;;
     default)
@@ -119,6 +123,23 @@ cmd_model() {
       local lang name f; lang="$(sanitize_lang "${id%%/*}")"; name="${id#*/}"
       f="$MODELS_DIR/$lang/$name.onnx"; [ -f "$f" ] || die "no such model: $id"
       set_config_var "VOICE_${lang}" "$f"; log "Default voice for '$lang' set to $name" ;;
+    fallback)
+      # hyprland-tts model fallback [<lang/name>|--clear]   (no args: show current)
+      local id="${1:-}"
+      if [ "$id" = "--clear" ]; then
+        unset_config_var "FALLBACK_VOICE"
+        log "Cleared fallback voice (last-used model is used instead)"
+      elif [ -z "$id" ]; then
+        if [ -n "${FALLBACK_VOICE:-}" ]; then echo "Fallback voice: $FALLBACK_VOICE"
+        else echo "No fallback voice set (using last-used model when language isn't detected)."
+        fi
+      else
+        [[ "$id" == */* ]] || die "id must be <lang>/<name> (or '--clear')"
+        local lang name f; lang="$(sanitize_lang "${id%%/*}")"; name="${id#*/}"
+        f="$MODELS_DIR/$lang/$name.onnx"; [ -f "$f" ] || die "no such model: $id"
+        set_config_var "FALLBACK_VOICE" "$f"
+        log "Fallback voice set to $id (used when the language can't be detected)"
+      fi ;;
     *) die "unknown model subcommand: $sub" ;;
   esac
 }

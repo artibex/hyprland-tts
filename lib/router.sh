@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # lib/router.sh — language detection + voice-model resolution.
-# Resolution order: detected language -> last-used model -> English -> any.
+# Resolution order: detected language -> explicit fallback voice (user-set,
+# see 'model fallback') -> last-used model -> English -> any.
 
 REGEX_DE='[ÄäÖöÜüß]|(^|[^[:alpha:]])(der|die|das|ist|und|nicht|ich|mit|von|dem|den|ein|eine|auch|aber|sind|wird)([^[:alpha:]]|$)'
 REGEX_FR='[ÉéÈèÇçÀàÙùÂâÊêÎîÔôÛûËëÏï]|(^|[^[:alpha:]])(le|la|les|est|une|des|que|dans|pour|avec|vous|nous|cette|être)([^[:alpha:]]|$)'
@@ -41,7 +42,13 @@ resolve_model() {
   if [ -n "$lang" ]; then
     m="$(model_for_lang "$lang")" && [ -n "$m" ] && { printf '%s' "$m"; return 0; }
   fi
-  # undetected/unavailable -> reuse last model actually used (Bug 1 fix)
+  # undetected/unavailable -> explicit user-set fallback voice takes priority
+  # over the auto "last used" heuristic, since it's a deliberate choice
+  # (see 'hyprland-tts model fallback', GUI: Voices > Fallback voice)
+  if [ -n "${FALLBACK_VOICE:-}" ] && [ -f "$FALLBACK_VOICE" ]; then
+    printf '%s' "$FALLBACK_VOICE"; return 0
+  fi
+  # otherwise reuse last model actually used (Bug 1 fix)
   if [ -f "$LAST_MODEL_FILE" ]; then
     m="$(cat "$LAST_MODEL_FILE" 2>/dev/null || true)"
     [ -n "$m" ] && [ -f "$m" ] && { printf '%s' "$m"; return 0; }

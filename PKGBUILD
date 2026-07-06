@@ -9,10 +9,11 @@ license=('GPL3')
 depends=('bash' 'piper-tts-bin' 'wl-clipboard' 'mpv' 'socat' 'procps-ng' 'curl' 'gawk' 'sed' 'grep'
          'gtk4' 'libadwaita' 'python-gobject')
 optdepends=(
-  'hyprland: target compositor for keybinds'
+  'hyprland: target compositor for keybinds and the hover command'
   'tesseract: read text inside copied images (OCR)'
   'tesseract-data-eng: English OCR language data'
   'perl-image-exiftool: read embedded image description metadata'
+  'at-spi2-core: speak text under the mouse cursor (hyprland-tts hover)'
 )
 makedepends=('make')
 

@@ -37,10 +37,11 @@ CHUNK_MAX="240"          # max characters per synthesized chunk
 # from these + user overrides (KEY_<action> in the config file), which keeps
 # rebinding fully data-driven for the GUI.
 # ------------------------------------------------------------------------------
-ACTION_ORDER=(speak stop next prev faster slower toggle restart)
+ACTION_ORDER=(speak hover stop next prev faster slower toggle restart)
 
 declare -gA ACTION_DEFAULT_KEY=(
   [speak]="SUPER, A"
+  [hover]="SUPER ALT, H"
   [stop]="SUPER, ESCAPE"
   [next]="SUPER ALT, right"
   [prev]="SUPER ALT, left"
@@ -50,13 +51,14 @@ declare -gA ACTION_DEFAULT_KEY=(
   [restart]="SUPER ALT, R"
 )
 declare -gA ACTION_CMD=(
-  [speak]="speak"        [stop]="stop"
+  [speak]="speak"        [hover]="hover"       [stop]="stop"
   [next]="ctl next"      [prev]="ctl prev"
   [faster]="ctl faster"  [slower]="ctl slower"
   [toggle]="ctl toggle"  [restart]="ctl restart"
 )
 declare -gA ACTION_LABEL=(
-  [speak]="Speak selection"   [stop]="Stop speech"
+  [speak]="Speak selection"   [hover]="Speak text under cursor"
+  [stop]="Stop speech"
   [next]="Next sentence"      [prev]="Previous sentence"
   [faster]="Speed up"         [slower]="Slow down"
   [toggle]="Pause / resume"   [restart]="Replay sentence"

@@ -23,7 +23,7 @@ done
 
 # shellcheck source=/dev/null
 source "$LIBDIR/common.sh"
-for _m in text router model image keybind player setup; do
+for _m in text router model image keybind player setup hover; do
   # shellcheck source=/dev/null
   source "$LIBDIR/$_m.sh"
 done
@@ -71,10 +71,11 @@ hyprland-tts — accessible, multilingual, offline TTS for Hyprland
 
 USAGE
   hyprland-tts speak                 Speak selection (or a clipboard image)
+  hyprland-tts hover                 Speak text under the mouse cursor (AT-SPI, best-effort)
   hyprland-tts stop                  Stop playback
   hyprland-tts ctl <cmd>             next|prev|restart|faster|slower|
                                      pause|resume|toggle|stop|status
-  hyprland-tts model <sub>           list|catalog|install|install-url|remove|default
+  hyprland-tts model <sub>           list|catalog|install|install-url|remove|default|fallback
   hyprland-tts keybind <sub>         list|set|check|reset  (rebind shortcuts safely)
   hyprland-tts gui                   Graphical voice + shortcut manager
   hyprland-tts setup                 Wire keybinds into Hyprland
@@ -94,6 +95,7 @@ main() {
   local cmd="${1:-help}"; shift || true
   case "$cmd" in
     speak)      cmd_speak "$@" ;;
+    hover)      cmd_hover "$@" ;;
     __daemon)   run_daemon ;;
     ctl)        cmd_ctl "$@" ;;
     stop)       cmd_stop ;;

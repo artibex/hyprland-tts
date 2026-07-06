@@ -192,8 +192,26 @@ class TtsWindow(Adw.ApplicationWindow):
         installed = self._parse_installed(out_i) if rc_i == 0 else []
         catalog = self._parse_catalog(out_c) if rc_c == 0 else []
 
+        fb_group = Adw.PreferencesGroup(
+            title="Fallback voice",
+            description="Used when the language of the selected text can't be detected, "
+                        "instead of just reusing the last voice you spoke with.")
+        self.voices_box.append(fb_group)
+        fb = next((v for v in installed if v["fallback"]), None)
+        if fb:
+            fb_row = Adw.ActionRow(title=fb["name"], subtitle=fb["lang"].upper())
+            clear_btn = Gtk.Button(label="Clear", valign=Gtk.Align.CENTER)
+            clear_btn.add_css_class("flat")
+            clear_btn.connect("clicked", lambda _b: self._worker(
+                ["model", "fallback", "--clear"], "Fallback voice cleared", timeout=10))
+            fb_row.add_suffix(clear_btn)
+        else:
+            fb_row = Adw.ActionRow(title="Not set",
+                                   subtitle="Falls back to the last voice you used")
+        fb_group.add(fb_row)
+
         inst_group = Adw.PreferencesGroup(title="Installed voices",
-                                          description="Set a per-language default or remove.")
+                                          description="Set a per-language default, or the fallback voice above, or remove.")
         self.voices_box.append(inst_group)
         if not installed:
             inst_group.add(Adw.ActionRow(title="No voices installed yet",
@@ -214,9 +232,10 @@ class TtsWindow(Adw.ApplicationWindow):
         rows = []
         for line in text.splitlines():
             p = line.split("\t")
-            if len(p) == 6:
+            if len(p) == 7:
                 rows.append({"id": p[0], "lang": p[1], "name": p[2], "size": p[3],
-                             "default": p[4] == "1", "last": p[5] == "1"})
+                             "default": p[4] == "1", "last": p[5] == "1",
+                             "fallback": p[6] == "1"})
         return rows
 
     @staticmethod
@@ -233,6 +252,8 @@ class TtsWindow(Adw.ApplicationWindow):
         bits = [v["lang"].upper(), human_size(v["size"])]
         if v["default"]:
             bits.append("default")
+        if v["fallback"]:
+            bits.append("fallback")
         if v["last"]:
             bits.append("last used")
         row = Adw.ActionRow(title=v["name"], subtitle=" · ".join(bits))
@@ -242,6 +263,12 @@ class TtsWindow(Adw.ApplicationWindow):
             star.add_css_class("flat")
             star.connect("clicked", lambda _b, i=v["id"]: self.on_set_default(i))
             row.add_suffix(star)
+        if not v["fallback"]:
+            fb_btn = Gtk.Button(label="Fallback", valign=Gtk.Align.CENTER,
+                                tooltip_text="Use when the language isn't detected")
+            fb_btn.add_css_class("flat")
+            fb_btn.connect("clicked", lambda _b, i=v["id"]: self.on_set_fallback(i))
+            row.add_suffix(fb_btn)
         trash = Gtk.Button(icon_name="user-trash-symbolic", valign=Gtk.Align.CENTER,
                            tooltip_text="Remove")
         trash.add_css_class("flat")
@@ -382,6 +409,9 @@ class TtsWindow(Adw.ApplicationWindow):
 
     def on_set_default(self, vid):
         self._worker(["model", "default", vid], f"Default set: {vid}", timeout=10)
+
+    def on_set_fallback(self, vid):
+        self._worker(["model", "fallback", vid], f"Fallback voice set: {vid}", timeout=10)
 
     def on_remove(self, vid):
         dialog = Adw.MessageDialog(transient_for=self, heading="Remove voice?",

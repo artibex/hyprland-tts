@@ -66,6 +66,14 @@ cmd_speak() {
     text="$(read_clipboard_image 2>/dev/null || true)"
   fi
   [ -n "${text//[[:space:]]/}" ] || exit 0
+  speak_text "$text"
+}
+
+# shared by cmd_speak and cmd_hover (lib/hover.sh) — everything from "got some
+# text" onward: resolve a voice, remember it, chunk it, hand off to the daemon.
+speak_text() {
+  local text="$1"
+  _player_paths
 
   have "$PIPER_BIN" || die "$PIPER_BIN not found (install piper-tts-bin)"
   have "$MPV_BIN"   || die "$MPV_BIN not found (install mpv)"

@@ -12,7 +12,7 @@ APPDIR   = $(DESTDIR)$(PREFIX)/share/applications
 DOCDIR   = $(DESTDIR)$(PREFIX)/share/doc/hyprland-tts
 LICDIR   = $(DESTDIR)$(PREFIX)/share/licenses/hyprland-tts
 
-LIBS = common text router model image keybind player setup
+LIBS = common text router model image keybind player setup hover
 
 .PHONY: all install uninstall check
 
@@ -21,12 +21,15 @@ all:
 
 check:
 	bash -n bin/hyprland-tts
+	for m in $(LIBS); do bash -n lib/$$m.sh; done
 	python3 -m py_compile gui/hyprland-tts-gui
+	python3 -m py_compile lib/hover-read.py
 
 install:
 	install -Dm755 bin/hyprland-tts        $(BINDIR)/hyprland-tts
 	install -Dm755 gui/hyprland-tts-gui    $(BINDIR)/hyprland-tts-gui
 	for m in $(LIBS); do install -Dm644 lib/$$m.sh $(LIBDIR)/$$m.sh; done
+	install -Dm755 lib/hover-read.py       $(LIBDIR)/hover-read.py
 	install -Dm644 share/applications/hyprland-tts.desktop $(APPDIR)/hyprland-tts.desktop
 	install -Dm644 share/tts.conf.sample   $(DOCDIR)/tts.conf.sample
 	install -Dm644 README.md               $(DOCDIR)/README.md
