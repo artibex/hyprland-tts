@@ -76,7 +76,7 @@ cmd_keybind() {
       # about to report as "current") whenever KEY_* lines are edited or
       # removed by hand instead of via `keybind set/reset` — those are the
       # only other callers that regenerate tts.conf. Confirmed for real: a
-      # config with no KEY_hover correctly reported the SUPER ALT, H default
+      # config with no KEY_<action> override correctly reported defaults
       # here, while the live Hyprland bind (and the on-disk tts.conf) was
       # still the OLD "SUPER ALT, a" from before the line was removed by
       # hand — this command was lying about what was actually bound. Cheap

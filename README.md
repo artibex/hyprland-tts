@@ -33,11 +33,12 @@ cloud, no telemetry, no background daemons.
 - **Reads copied images** *(optional)* — if you copy an image, it reads the embedded
   description (via exiftool) or the text inside it (via tesseract OCR). *(Web image
   alt-text can't be reached by a global tool — that lives in the browser DOM.)*
-- **Speak whatever's under your mouse cursor** *(optional, on-demand)* — press a shortcut
-  and it reads the text at the current pointer position, no selecting required. Works in
-  apps that expose accessibility info (most GTK/Qt apps, file managers, many browsers) —
-  not in terminals, games, or most Electron apps (VS Code, Discord, Slack) unless they've
-  had accessibility explicitly turned on. This is a single on-demand query, not continuous
+- **Speak whatever's under your mouse cursor** *(optional, on-demand; CLI-only for now)* —
+  available via `hyprland-tts hover` while stability work continues. It is intentionally
+  not shown in the Shortcuts UI and has no default keybind right now. It works in apps
+  that expose accessibility info (most GTK/Qt apps, file managers, many browsers) — not
+  in terminals, games, or most Electron apps (VS Code, Discord, Slack) unless they've had
+  accessibility explicitly turned on. This is a single on-demand query, not continuous
   hover-tracking — see *How it works* for why.
 - **Graphical manager** — a GTK4 / libadwaita app to install/remove/default voices **and**
   rebind shortcuts, with conflict checking against your other Hyprland binds. Everything is
@@ -85,12 +86,14 @@ Then highlight some text and press **SUPER + A**.
 | Shortcut | Action |
 | --- | --- |
 | `SUPER + A` | Speak the highlighted selection (or a copied image) |
-| `SUPER + ALT + H` | Speak the text under the mouse cursor |
 | `SUPER + ESCAPE` | Stop speech |
 | `SUPER + ALT + →` / `←` | Next / previous sentence |
 | `SUPER + ALT + ↑` / `↓` | Speed up / slow down (live, pitch-preserving) |
 | `SUPER + ALT + Space` | Pause / resume |
 | `SUPER + ALT + R` | Replay current sentence |
+
+`hover` is currently CLI-only (`hyprland-tts hover`) and intentionally hidden from
+the Shortcuts UI/default bindings while that feature is stabilized.
 
 **Rebinding is safe and easy.** Use the GUI's *Shortcuts* tab (press a new combo; it warns
 if it clashes with another Hyprland bind), or the CLI:

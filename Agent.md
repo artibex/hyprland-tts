@@ -139,8 +139,10 @@ theoretical).
 - **Root/sudo guard (real-world fix)** — ✅ `refuse_root()` blocks every subcommand under
   root, in both the dispatcher and the GUI; see the gotcha in §5.
 - **Hover: speak text under the cursor** — ✅ `hover.sh::cmd_hover` + `hover-read.py`,
-  bound to `SUPER ALT, H` by default. **Deliberately on-demand, one AT-SPI query per
-  keypress — not continuous hover polling**, because true continuous hover needs a
+  intentionally **not exposed via default keybinds or the Shortcuts UI right now**
+  (CLI-only via `hyprland-tts hover`) while stability work continues. Deliberately
+  on-demand, one AT-SPI query per keypress — not continuous hover polling, because true
+  continuous hover needs a
   permanent background daemon watching pointer position, which conflicts with this
   project's "no background daemons" principle (see §1 Mission). This was an explicit
   scope decision asked of the user, not assumed — see the options in the PR/session that
@@ -332,7 +334,8 @@ theoretical).
   fake `mpv`) while never touching audio hardware or a live user's speakers.
 - **XDG compliance**; **idempotent** setup (2× setup → 1 source line; uninstall → 0 refs).
 - **Keep core shortcuts as defaults** (`SUPER+A`, `SUPER+ESCAPE`); playback controls default
-  to `SUPER+ALT+…`. All are user-rebindable via `keybind`.
+  to `SUPER+ALT+…`. Hover is intentionally not bound/shown in UI for now. Exposed
+  shortcuts are user-rebindable via `keybind`.
 - **Update docs with code:** README (users) + this Agent.md (agents).
 
 ---
