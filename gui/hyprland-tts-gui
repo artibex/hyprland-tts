@@ -1,0 +1,517 @@
+#!/usr/bin/env python3
+# ==============================================================================
+# hyprland-tts-gui — graphical voice + shortcut manager for hyprland-tts
+# ------------------------------------------------------------------------------
+# A thin, defensive GTK4 / libadwaita front end. It contains NO TTS, download,
+# or keybind logic itself: every action shells out to the `hyprland-tts` CLI
+# (`model …`, `keybind …`), which is the single source of truth and enforces all
+# validation/security. See Agent.md.
+# ==============================================================================
+import os
+import sys
+import shutil
+import threading
+import subprocess
+
+# Refuse root outright: as root this has no access to the caller's Wayland
+# session (hence "Authorization required" / "Gtk couldn't be initialized"
+# crashes) and would read/write ~/.config, ~/.local under /root instead of the
+# real user's home. The bin/hyprland-tts wrapper already blocks this; this
+# check is defense-in-depth for anyone invoking hyprland-tts-gui directly.
+if hasattr(os, "geteuid") and os.geteuid() == 0 and os.environ.get("HYPRLAND_TTS_ALLOW_ROOT") != "1":
+    sys.stderr.write(
+        "hyprland-tts-gui: refusing to run as root/with sudo.\n"
+        "It needs your desktop session (Wayland) and your own $HOME — run it as\n"
+        "your normal user instead.\n"
+    )
+    sys.exit(1)
+
+
+def _reexec_with_gtk_python():
+    """If the interpreter running this script (whatever invoked it — a
+    terminal, `hyprland-tts gui`, or a desktop launcher's own Exec= using this
+    script's #!/usr/bin/env python3 shebang directly) can't import GTK4/
+    libadwaita, but /usr/bin/python3 can, re-exec under that one instead of
+    just failing.
+
+    Why this exists: `bin/hyprland-tts gui` already probes for a working
+    python3 (see _gui_python there) because a PATH-shadowing interpreter
+    (pyenv/mise/conda/uv/asdf) can sit ahead of /usr/bin/python3 and lacks the
+    system PyGObject install — that was a real bug a user hit. But a desktop
+    launcher's Exec= can invoke this script directly, bypassing that wrapper
+    entirely and falling back to this file's own shebang — which re-triggers
+    the exact same class of failure, silently, since a launcher has no
+    terminal to show the resulting ModuleNotFoundError in. Doing the same
+    probe-and-reexec here means it's fixed regardless of launch path.
+    """
+    if os.environ.get("_HYPRLAND_TTS_GUI_REEXECED") == "1":
+        return  # already retried once; don't loop if /usr/bin/python3 also fails
+    try:
+        import gi
+        gi.require_version("Gtk", "4.0")
+        gi.require_version("Adw", "1")
+        return  # current interpreter already works, nothing to do
+    except Exception:
+        pass
+    candidate = "/usr/bin/python3"
+    if os.path.realpath(sys.executable) == os.path.realpath(candidate):
+        return  # already running it and it still failed above
+    if os.access(candidate, os.X_OK):
+        os.environ["_HYPRLAND_TTS_GUI_REEXECED"] = "1"
+        try:
+            os.execv(candidate, [candidate, os.path.realpath(__file__), *sys.argv[1:]])
+        except Exception:
+            pass  # fall through to the normal import-error handling below
+
+
+_reexec_with_gtk_python()
+
+# Fail with a clear, non-scary message if the GTK stack isn't present.
+try:
+    import gi
+    gi.require_version("Gtk", "4.0")
+    gi.require_version("Adw", "1")
+    from gi.repository import Gtk, Adw, GLib, Gio, Gdk
+except Exception as exc:  # ImportError or ValueError from require_version
+    sys.stderr.write(
+        "hyprland-tts-gui needs GTK4 + libadwaita + PyGObject.\n"
+        "Install them with:\n"
+        "  sudo pacman -S --needed gtk4 libadwaita python-gobject\n"
+        f"\n(details: {exc})\n"
+    )
+    sys.exit(1)
+
+APP_ID = "com.github.artibex.hyprland_tts"
+CLI = os.environ.get("HYPRLAND_TTS_CLI", "hyprland-tts")
+
+
+def _resolve_cli():
+    found = shutil.which(CLI)
+    if found:
+        return found
+    here = os.path.dirname(os.path.realpath(__file__))
+    cand = os.path.abspath(os.path.join(here, "..", "bin", "hyprland-tts"))
+    return cand if os.access(cand, os.X_OK) else None
+
+
+CLI_PATH = _resolve_cli()
+
+
+def run_cli(args, timeout=None):
+    """Run the CLI. Returns (rc, stdout, stderr). Never raises."""
+    if not CLI_PATH:
+        return (127, "", "hyprland-tts CLI not found in PATH")
+    try:
+        p = subprocess.run([CLI_PATH, *args], capture_output=True, text=True, timeout=timeout)
+        return (p.returncode, p.stdout, p.stderr)
+    except subprocess.TimeoutExpired:
+        return (124, "", "operation timed out")
+    except Exception as exc:  # pragma: no cover
+        return (1, "", str(exc))
+
+
+def human_size(nbytes):
+    try:
+        n = float(nbytes)
+    except (TypeError, ValueError):
+        return "?"
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} GB"
+
+
+# modifier bit names for capturing a shortcut
+def accel_to_combo(keyval, state):
+    """Turn a Gdk key event into a Hyprland-style 'MODS, KEY' string, or None."""
+    mods = []
+    if state & Gdk.ModifierType.SUPER_MASK:
+        mods.append("SUPER")
+    if state & Gdk.ModifierType.CONTROL_MASK:
+        mods.append("CTRL")
+    if state & Gdk.ModifierType.ALT_MASK:
+        mods.append("ALT")
+    if state & Gdk.ModifierType.SHIFT_MASK:
+        mods.append("SHIFT")
+    name = Gdk.keyval_name(keyval)
+    if not name:
+        return None
+    # ignore lone modifier presses
+    if name in ("Super_L", "Super_R", "Control_L", "Control_R",
+                "Alt_L", "Alt_R", "Shift_L", "Shift_R", "Meta_L", "Meta_R"):
+        return None
+    return f"{' '.join(mods)}, {name}"
+
+
+class TtsWindow(Adw.ApplicationWindow):
+    def __init__(self, app):
+        super().__init__(application=app, title="hyprland-tts")
+        self.set_default_size(600, 720)
+        self._busy = False
+
+        self.toasts = Adw.ToastOverlay()
+        self.set_content(self.toasts)
+
+        toolbar = Adw.ToolbarView()
+        self.toasts.set_child(toolbar)
+        header = Adw.HeaderBar()
+        toolbar.add_top_bar(header)
+
+        # view switcher: Voices | Shortcuts
+        self.stack = Adw.ViewStack()
+        switcher = Adw.ViewSwitcher(stack=self.stack,
+                                    policy=Adw.ViewSwitcherPolicy.WIDE)
+        header.set_title_widget(switcher)
+
+        self.spinner = Gtk.Spinner()
+        header.pack_end(self.spinner)
+        refresh = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Refresh")
+        refresh.connect("clicked", lambda _b: self.refresh())
+        header.pack_start(refresh)
+
+        toolbar.set_content(self.stack)
+
+        # --- Voices page ---
+        self.voices_page = Gtk.ScrolledWindow(vexpand=True)
+        vclamp = Adw.Clamp(maximum_size=680, margin_top=12, margin_bottom=12,
+                           margin_start=12, margin_end=12)
+        self.voices_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+        vclamp.set_child(self.voices_box)
+        self.voices_page.set_child(vclamp)
+        self.stack.add_titled_with_icon(self.voices_page, "voices", "Voices",
+                                        "audio-speakers-symbolic")
+
+        # --- Shortcuts page ---
+        self.keys_page = Gtk.ScrolledWindow(vexpand=True)
+        kclamp = Adw.Clamp(maximum_size=680, margin_top=12, margin_bottom=12,
+                           margin_start=12, margin_end=12)
+        self.keys_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+        kclamp.set_child(self.keys_box)
+        self.keys_page.set_child(kclamp)
+        self.stack.add_titled_with_icon(self.keys_page, "keys", "Shortcuts",
+                                        "input-keyboard-symbolic")
+
+        # header add-url button only makes sense on voices page
+        self.add_url_btn = Gtk.Button(icon_name="list-add-symbolic",
+                                      tooltip_text="Install from custom URL")
+        self.add_url_btn.connect("clicked", self.on_add_url)
+        header.pack_end(self.add_url_btn)
+
+        GLib.idle_add(self.refresh)
+
+    # -- helpers ---------------------------------------------------------------
+    def toast(self, text):
+        self.toasts.add_toast(Adw.Toast(title=text, timeout=3))
+
+    def set_busy(self, busy):
+        self._busy = busy
+        self.spinner.start() if busy else self.spinner.stop()
+
+    @staticmethod
+    def _clear(box):
+        child = box.get_first_child()
+        while child:
+            nxt = child.get_next_sibling()
+            box.remove(child)
+            child = nxt
+
+    # -- data loading ----------------------------------------------------------
+    def refresh(self):
+        if not CLI_PATH:
+            return False
+        self._render_voices()
+        self._render_keys()
+        return False
+
+    # -- Voices ----------------------------------------------------------------
+    def _render_voices(self):
+        self._clear(self.voices_box)
+        rc_i, out_i, err_i = run_cli(["model", "list", "--porcelain"], timeout=10)
+        rc_c, out_c, _ = run_cli(["model", "catalog", "--porcelain"], timeout=10)
+        installed = self._parse_installed(out_i) if rc_i == 0 else []
+        catalog = self._parse_catalog(out_c) if rc_c == 0 else []
+
+        fb_group = Adw.PreferencesGroup(
+            title="Fallback voice",
+            description="Used when the language of the selected text can't be detected, "
+                        "instead of just reusing the last voice you spoke with.")
+        self.voices_box.append(fb_group)
+        fb = next((v for v in installed if v["fallback"]), None)
+        if fb:
+            fb_row = Adw.ActionRow(title=fb["name"], subtitle=fb["lang"].upper())
+            clear_btn = Gtk.Button(label="Clear", valign=Gtk.Align.CENTER)
+            clear_btn.add_css_class("flat")
+            clear_btn.connect("clicked", lambda _b: self._worker(
+                ["model", "fallback", "--clear"], "Fallback voice cleared", timeout=10))
+            fb_row.add_suffix(clear_btn)
+        else:
+            fb_row = Adw.ActionRow(title="Not set",
+                                   subtitle="Falls back to the last voice you used")
+        fb_group.add(fb_row)
+
+        inst_group = Adw.PreferencesGroup(title="Installed voices",
+                                          description="Set a per-language default, or the fallback voice above, or remove.")
+        self.voices_box.append(inst_group)
+        if not installed:
+            inst_group.add(Adw.ActionRow(title="No voices installed yet",
+                                         subtitle="Install one from the list below."))
+        for v in installed:
+            inst_group.add(self._installed_row(v))
+
+        cat_group = Adw.PreferencesGroup(title="Available to download",
+                                         description="Curated neural voices (downloaded locally).")
+        self.voices_box.append(cat_group)
+        for c in catalog:
+            cat_group.add(self._catalog_row(c))
+        if rc_i != 0:
+            self.toast(err_i.strip() or "could not list installed voices")
+
+    @staticmethod
+    def _parse_installed(text):
+        rows = []
+        for line in text.splitlines():
+            p = line.split("\t")
+            if len(p) == 7:
+                rows.append({"id": p[0], "lang": p[1], "name": p[2], "size": p[3],
+                             "default": p[4] == "1", "last": p[5] == "1",
+                             "fallback": p[6] == "1"})
+        return rows
+
+    @staticmethod
+    def _parse_catalog(text):
+        rows = []
+        for line in text.splitlines():
+            p = line.split("\t")
+            if len(p) == 6:
+                rows.append({"key": p[0], "lang": p[1], "model": p[2], "quality": p[3],
+                             "installed": p[4] == "1", "label": p[5]})
+        return rows
+
+    def _installed_row(self, v):
+        bits = [v["lang"].upper(), human_size(v["size"])]
+        if v["default"]:
+            bits.append("default")
+        if v["fallback"]:
+            bits.append("fallback")
+        if v["last"]:
+            bits.append("last used")
+        row = Adw.ActionRow(title=v["name"], subtitle=" · ".join(bits))
+        if not v["default"]:
+            star = Gtk.Button(icon_name="starred-symbolic", valign=Gtk.Align.CENTER,
+                              tooltip_text=f"Make default for {v['lang'].upper()}")
+            star.add_css_class("flat")
+            star.connect("clicked", lambda _b, i=v["id"]: self.on_set_default(i))
+            row.add_suffix(star)
+        if not v["fallback"]:
+            fb_btn = Gtk.Button(label="Fallback", valign=Gtk.Align.CENTER,
+                                tooltip_text="Use when the language isn't detected")
+            fb_btn.add_css_class("flat")
+            fb_btn.connect("clicked", lambda _b, i=v["id"]: self.on_set_fallback(i))
+            row.add_suffix(fb_btn)
+        trash = Gtk.Button(icon_name="user-trash-symbolic", valign=Gtk.Align.CENTER,
+                           tooltip_text="Remove")
+        trash.add_css_class("flat")
+        trash.add_css_class("destructive-action")
+        trash.connect("clicked", lambda _b, i=v["id"]: self.on_remove(i))
+        row.add_suffix(trash)
+        return row
+
+    def _catalog_row(self, c):
+        row = Adw.ActionRow(title=c["label"],
+                            subtitle=f"{c['lang'].upper()} · {c['quality']} · {c['key']}")
+        if c["installed"]:
+            ok = Gtk.Image.new_from_icon_name("emblem-ok-symbolic")
+            ok.set_tooltip_text("Installed")
+            row.add_suffix(ok)
+        else:
+            btn = Gtk.Button(label="Install", valign=Gtk.Align.CENTER)
+            btn.add_css_class("suggested-action")
+            btn.connect("clicked", lambda _b, k=c["key"]: self.on_install(k))
+            row.add_suffix(btn)
+        return row
+
+    # -- Shortcuts -------------------------------------------------------------
+    def _render_keys(self):
+        self._clear(self.keys_box)
+        rc, out, err = run_cli(["keybind", "list", "--porcelain"], timeout=10)
+        group = Adw.PreferencesGroup(
+            title="Keyboard shortcuts",
+            description="Click a shortcut to rebind it. New bindings are checked "
+                        "against your other Hyprland shortcuts first.")
+        self.keys_box.append(group)
+        if rc != 0:
+            group.add(Adw.ActionRow(title="Could not read shortcuts",
+                                    subtitle=err.strip() or "keybind list failed"))
+            return
+        for line in out.splitlines():
+            p = line.split("\t")
+            if len(p) != 3:
+                continue
+            action, label, combo = p
+            row = Adw.ActionRow(title=label, subtitle=action)
+            btn = Gtk.Button(label=combo or "unset", valign=Gtk.Align.CENTER)
+            btn.add_css_class("flat")
+            btn.connect("clicked", lambda _b, a=action, lb=label: self.on_rebind(a, lb))
+            row.add_suffix(btn)
+            row.set_activatable_widget(btn)
+            group.add(row)
+
+        reset = Adw.PreferencesGroup()
+        self.keys_box.append(reset)
+        rrow = Adw.ActionRow(title="Reset all shortcuts",
+                             subtitle="Restore the default key bindings")
+        rbtn = Gtk.Button(label="Reset", valign=Gtk.Align.CENTER)
+        rbtn.connect("clicked", lambda _b: self._worker(["keybind", "reset"],
+                                                        "Shortcuts reset", timeout=10))
+        rrow.add_suffix(rbtn)
+        reset.add(rrow)
+
+    def on_rebind(self, action, label):
+        dialog = Adw.MessageDialog(
+            transient_for=self, heading=f"Rebind “{label}”",
+            body="Press the new key combination…")
+        capture = Gtk.Label(label="Waiting for keys…")
+        capture.add_css_class("title-2")
+        capture.set_margin_top(12)
+        capture.set_margin_bottom(12)
+        dialog.set_extra_child(capture)
+        state = {"combo": None}
+
+        controller = Gtk.EventControllerKey()
+
+        def on_key(_c, keyval, _code, mods):
+            combo = accel_to_combo(keyval, mods)
+            if combo:
+                state["combo"] = combo
+                capture.set_text(combo)
+                dialog.set_response_enabled("apply", True)
+            return True
+
+        controller.connect("key-pressed", on_key)
+        dialog.add_controller(controller)
+
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("apply", "Apply")
+        dialog.set_response_enabled("apply", False)
+        dialog.set_response_appearance("apply", Adw.ResponseAppearance.SUGGESTED)
+        dialog.connect("response", self._on_rebind_response, action, state)
+        dialog.present()
+
+    def _on_rebind_response(self, _dialog, response, action, state):
+        if response != "apply" or not state["combo"]:
+            return
+        combo = state["combo"]
+        # check for conflicts first (CLI queries hyprctl binds)
+        rc, out, _ = run_cli(["keybind", "check", combo], timeout=10)
+        conflict = out.strip()
+        if conflict:
+            self._confirm_conflict(action, combo, conflict)
+        else:
+            self._worker(["keybind", "set", action, combo], f"Bound to {combo}", timeout=10)
+
+    def _confirm_conflict(self, action, combo, conflict):
+        dialog = Adw.MessageDialog(
+            transient_for=self, heading="Shortcut already in use",
+            body=f"“{combo}” is already bound to:\n{conflict}\n\nBind it anyway?")
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("force", "Bind anyway")
+        dialog.set_response_appearance("force", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.connect(
+            "response",
+            lambda _d, r: r == "force" and self._worker(
+                ["keybind", "set", action, combo, "--force"],
+                f"Bound to {combo}", timeout=10))
+        dialog.present()
+
+    # -- actions ---------------------------------------------------------------
+    def _worker(self, args, ok_msg, timeout=None):
+        if self._busy:
+            self.toast("Please wait for the current operation to finish.")
+            return
+        self.set_busy(True)
+
+        def task():
+            rc, _out, err = run_cli(args, timeout=timeout)
+
+            def done():
+                self.set_busy(False)
+                self.toast(ok_msg if rc == 0 else
+                           (err.strip().splitlines()[-1] if err.strip() else "operation failed"))
+                self.refresh()
+                return False
+            GLib.idle_add(done)
+        threading.Thread(target=task, daemon=True).start()
+
+    def on_install(self, key):
+        self.toast(f"Downloading {key}…")
+        self._worker(["model", "install", key], f"Installed {key}", timeout=600)
+
+    def on_set_default(self, vid):
+        self._worker(["model", "default", vid], f"Default set: {vid}", timeout=10)
+
+    def on_set_fallback(self, vid):
+        self._worker(["model", "fallback", vid], f"Fallback voice set: {vid}", timeout=10)
+
+    def on_remove(self, vid):
+        dialog = Adw.MessageDialog(transient_for=self, heading="Remove voice?",
+                                   body=f"Delete “{vid}” from disk? This cannot be undone.")
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("remove", "Remove")
+        dialog.set_response_appearance("remove", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.connect("response", lambda _d, r, i=vid:
+                       r == "remove" and self._worker(["model", "remove", i],
+                                                       f"Removed {i}", timeout=10))
+        dialog.present()
+
+    def on_add_url(self, _btn):
+        dialog = Adw.MessageDialog(
+            transient_for=self, heading="Install from custom URL",
+            body="Link to a Piper .onnx model. The .onnx.json is fetched automatically "
+                 "if you leave it blank.")
+        grid = Gtk.Grid(row_spacing=8, column_spacing=8, margin_top=8)
+        lang_e = Gtk.Entry(placeholder_text="lang (e.g. it, pl)", max_length=3)
+        onnx_e = Gtk.Entry(placeholder_text="https://…/voice.onnx", hexpand=True)
+        json_e = Gtk.Entry(placeholder_text="https://…/voice.onnx.json (optional)", hexpand=True)
+        for i, (lbl, w) in enumerate((("Language", lang_e), ("Model URL", onnx_e),
+                                      ("JSON URL", json_e))):
+            grid.attach(Gtk.Label(label=lbl, halign=Gtk.Align.END), 0, i, 1, 1)
+            grid.attach(w, 1, i, 1, 1)
+        dialog.set_extra_child(grid)
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("install", "Install")
+        dialog.set_response_appearance("install", Adw.ResponseAppearance.SUGGESTED)
+        dialog.connect("response", self._on_add_url_response, lang_e, onnx_e, json_e)
+        dialog.present()
+
+    def _on_add_url_response(self, _dialog, response, lang_e, onnx_e, json_e):
+        if response != "install":
+            return
+        lang, onnx, js = (lang_e.get_text().strip(), onnx_e.get_text().strip(),
+                          json_e.get_text().strip())
+        if not lang or not onnx:
+            self.toast("Language and model URL are required.")
+            return
+        args = ["model", "install-url", lang, onnx] + ([js] if js else [])
+        self.toast("Downloading…")
+        self._worker(args, "Custom voice installed", timeout=600)
+
+
+class TtsApp(Adw.Application):
+    def __init__(self):
+        super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
+
+    def do_activate(self):
+        win = self.props.active_window or TtsWindow(self)
+        win.present()
+
+
+def main():
+    if not CLI_PATH:
+        sys.stderr.write("hyprland-tts CLI not found in PATH.\n")
+        return 1
+    return TtsApp().run(sys.argv)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

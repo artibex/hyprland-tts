@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=hyprland-tts Voices
+GenericName=Text-to-Speech Voice Manager
+Comment=Install and manage offline speech voices for hyprland-tts
+# Routed through the CLI dispatcher (not the raw hyprland-tts-gui binary) so an
+# app-launcher's environment gets the same PATH-shadowing-safe python3
+# resolution as a terminal launch — see bin/hyprland-tts::_gui_python.
+Exec=hyprland-tts gui
+Icon=audio-speakers
+Terminal=false
+Categories=Utility;Accessibility;AudioVideo;
+Keywords=tts;speech;voice;accessibility;piper;
+StartupNotify=true

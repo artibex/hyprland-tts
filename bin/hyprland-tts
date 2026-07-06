@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# hyprland-tts — accessible, multilingual, offline Text-to-Speech for Hyprland
+# ------------------------------------------------------------------------------
+# Thin dispatcher. All logic lives in the lib/ modules (single source of truth);
+# the GUI and installers are thin skins over these subcommands. See Agent.md.
+# ==============================================================================
+set -euo pipefail
+
+# --- locate the library directory (works installed or from a git checkout) ----
+_self="$(readlink -f "${BASH_SOURCE[0]}")"
+_selfdir="$(dirname "$_self")"
+LIBDIR=""
+for _cand in \
+  "${HYPRLAND_TTS_LIB:-}" \
+  "$_selfdir/../lib/hyprland-tts" \
+  "$_selfdir/../lib" \
+  "/usr/lib/hyprland-tts" \
+  "$HOME/.local/lib/hyprland-tts"; do
+  if [ -n "$_cand" ] && [ -f "$_cand/common.sh" ]; then LIBDIR="$_cand"; break; fi
+done
+[ -n "$LIBDIR" ] || { echo "hyprland-tts: cannot locate library directory" >&2; exit 1; }
+
+# shellcheck source=/dev/null
+source "$LIBDIR/common.sh"
+for _m in text router model image keybind player setup hover; do
+  # shellcheck source=/dev/null
+  source "$LIBDIR/$_m.sh"
+done
+
+# --- GUI launcher -------------------------------------------------------------
+# Find a python3 that actually has the GTK bindings. A bare `python3` lookup
+# trusts $PATH, which on many desktops is shadowed by a user-managed interpreter
+# (pyenv/mise/conda/uv/asdf) that has no idea gtk4/libadwaita exist — that
+# interpreter is what pacman-installed PyGObject is NOT installed into. This bit
+# a real user: `hyprland-tts gui` reported the stack missing while
+# `pacman -S gtk4 libadwaita python-gobject` said "up to date". Root cause: PATH.
+# Fix: probe PATH's python3 first, then fall back to the system interpreter by
+# absolute path (sudo's sanitized PATH happens to hit this one, which is why it
+# "worked" under sudo — that is a red herring, NOT a real fix; see the root guard
+# in main(), running the GUI as root breaks Wayland/GTK entirely).
+_gui_python() {
+  local cand
+  for cand in python3 /usr/bin/python3; do
+    have "$cand" || continue
+    if "$cand" -c 'import gi; gi.require_version("Gtk","4.0"); gi.require_version("Adw","1")' \
+         >/dev/null 2>&1; then
+      printf '%s' "$cand"; return 0
+    fi
+  done
+  return 1
+}
+
+cmd_gui() {
+  local gui=""
+  if gui="$(command -v hyprland-tts-gui 2>/dev/null)"; then :
+  elif [ -x "$_selfdir/../gui/hyprland-tts-gui" ]; then gui="$_selfdir/../gui/hyprland-tts-gui"
+  else die "GUI component not found."
+  fi
+
+  local py
+  py="$(_gui_python)" || die "GUI needs GTK4 + libadwaita + PyGObject for python3. Install them:\n  sudo pacman -S --needed gtk4 libadwaita python-gobject\n\nIf they're already installed and this still fails, another 'python3' earlier in\nyour PATH (pyenv/mise/conda/uv/asdf) is shadowing the system interpreter that\nthose packages install into. Verify with:\n  which python3\n  /usr/bin/python3 -c 'import gi'"
+  # invoke python3 explicitly on the script path (bypasses its #!/usr/bin/env
+  # shebang, so this always runs with the interpreter we just validated)
+  exec "$py" "$gui" "$@"
+}
+
+usage() {
+  cat <<'EOF'
+hyprland-tts — accessible, multilingual, offline TTS for Hyprland
+
+USAGE
+  hyprland-tts speak                 Speak selection (or a clipboard image)
+  hyprland-tts hover                 Speak text under the mouse cursor (AT-SPI, best-effort)
+  hyprland-tts stop                  Stop playback
+  hyprland-tts ctl <cmd>             next|prev|restart|faster|slower|
+                                     pause|resume|toggle|stop|status
+  hyprland-tts model <sub>           list|catalog|install|install-url|remove|default|fallback
+  hyprland-tts keybind <sub>         list|set|check|reset  (rebind shortcuts safely)
+  hyprland-tts gui                   Graphical voice + shortcut manager
+  hyprland-tts setup                 Wire keybinds into Hyprland
+  hyprland-tts uninstall             Remove keybinds (keep models)
+  hyprland-tts purge                 Remove keybinds AND models/state/config
+  hyprland-tts help                  Show this help
+EOF
+}
+
+refuse_root() {
+  [ "${HYPRLAND_TTS_ALLOW_ROOT:-}" = "1" ] && return 0
+  [ "$(id -u)" -ne 0 ] || die "Do not run hyprland-tts as root or with sudo.\nIt manages files under your own \$HOME (~/.config, ~/.local) and talks to your\nWayland session — both are wrong or unreachable as root. Run it as your normal\ndesktop user:\n  hyprland-tts $*"
+}
+
+main() {
+  refuse_root "$@"
+  local cmd="${1:-help}"; shift || true
+  case "$cmd" in
+    speak)      cmd_speak "$@" ;;
+    hover)      cmd_hover "$@" ;;
+    __daemon)   run_daemon ;;
+    ctl)        cmd_ctl "$@" ;;
+    stop)       cmd_stop ;;
+    model)      cmd_model "$@" ;;
+    keybind)    cmd_keybind "$@" ;;
+    gui)        cmd_gui "$@" ;;
+    setup)      cmd_setup ;;
+    uninstall)  cmd_uninstall ;;
+    purge)      cmd_purge ;;
+    -h|--help|help) usage ;;
+    *) log "unknown command: $cmd"; usage; exit 1 ;;
+  esac
+}
+
+main "$@"
