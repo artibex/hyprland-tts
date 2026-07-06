@@ -22,14 +22,15 @@ echo "================================================="
 # --- 1. Runtime dependencies --------------------------------------------------
 echo "[1/4] Checking dependencies..."
 missing=()
-for c in wl-paste piper-tts aplay curl awk sed grep pkill; do
+for c in wl-paste piper-tts mpv socat curl awk sed grep; do
   command -v "$c" >/dev/null 2>&1 || missing+=("$c")
 done
 if [ "${#missing[@]}" -gt 0 ]; then
   echo "  Missing tools: ${missing[*]}"
   echo "  Install the packages providing them, e.g.:"
-  echo "    sudo pacman -S --needed wl-clipboard alsa-utils curl grep sed gawk procps-ng"
+  echo "    sudo pacman -S --needed wl-clipboard mpv socat curl grep sed gawk gtk4 libadwaita python-gobject"
   echo "    <aur-helper> -S piper-tts-bin"
+  echo "  Optional (image reading): sudo pacman -S --needed tesseract tesseract-data-eng perl-image-exiftool"
   echo "  (Re-run this script afterwards.)"
   # piper-tts is the only hard blocker for actually speaking; warn but continue,
   # so the user can still install voices and wire keybinds.

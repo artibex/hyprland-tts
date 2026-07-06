@@ -6,12 +6,13 @@ pkgdesc="Accessible, multilingual, offline Text-to-Speech for Hyprland (Piper) w
 arch=('any')
 url="https://github.com/artibex/hyprland-tts"
 license=('GPL3')
-depends=('bash' 'piper-tts-bin' 'wl-clipboard' 'alsa-utils' 'procps-ng' 'curl' 'gawk' 'sed' 'grep')
+depends=('bash' 'piper-tts-bin' 'wl-clipboard' 'mpv' 'socat' 'procps-ng' 'curl' 'gawk' 'sed' 'grep'
+         'gtk4' 'libadwaita' 'python-gobject')
 optdepends=(
-  'gtk4: graphical voice manager'
-  'libadwaita: graphical voice manager'
-  'python-gobject: graphical voice manager'
   'hyprland: target compositor for keybinds'
+  'tesseract: read text inside copied images (OCR)'
+  'tesseract-data-eng: English OCR language data'
+  'perl-image-exiftool: read embedded image description metadata'
 )
 makedepends=('make')
 

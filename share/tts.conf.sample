@@ -1,19 +1,20 @@
 # ==============================================================================
-# hyprland-tts — Text-to-Speech keybinds (reference copy)
+# hyprland-tts — Text-to-Speech keybinds (REFERENCE COPY)
 # ------------------------------------------------------------------------------
-# `hyprland-tts setup` writes this file to ~/.config/hypr/tts.conf and adds
-#   source = ~/.config/hypr/tts.conf
-# to your hyprland.conf. You can edit the copy in ~/.config/hypr/tts.conf freely.
+# The real file at ~/.config/hypr/tts.conf is GENERATED from your keybind
+# settings. Change shortcuts safely with:
+#     hyprland-tts keybind set <action> "MODS, KEY"     # e.g. "SUPER, B"
+#     hyprland-tts gui                                   # Shortcuts tab
+# Manual edits to the generated file are overwritten on the next keybind change.
+# `hyprland-tts setup` writes it and adds `source = ~/.config/hypr/tts.conf`
+# to your hyprland.conf.
 # ==============================================================================
 
-# Core
-bind = SUPER, A, exec, hyprland-tts speak            # speak current selection
-bind = SUPER, ESCAPE, exec, hyprland-tts stop        # stop speech
-
-# Smart playback controls
-bind = SUPER ALT, right, exec, hyprland-tts ctl next     # next sentence
-bind = SUPER ALT, left,  exec, hyprland-tts ctl prev     # previous sentence
-bind = SUPER ALT, down,  exec, hyprland-tts ctl slower   # slow down
-bind = SUPER ALT, up,    exec, hyprland-tts ctl faster   # speed up
-bind = SUPER ALT, space, exec, hyprland-tts ctl toggle   # pause / resume
-bind = SUPER ALT, R,     exec, hyprland-tts ctl restart  # replay current sentence
+bind = SUPER, A, exec, hyprland-tts speak            # @tts:speak  (Speak selection)
+bind = SUPER, ESCAPE, exec, hyprland-tts stop        # @tts:stop   (Stop speech)
+bind = SUPER ALT, right, exec, hyprland-tts ctl next     # @tts:next    (Next sentence)
+bind = SUPER ALT, left,  exec, hyprland-tts ctl prev     # @tts:prev    (Previous sentence)
+bind = SUPER ALT, up,    exec, hyprland-tts ctl faster   # @tts:faster  (Speed up)
+bind = SUPER ALT, down,  exec, hyprland-tts ctl slower   # @tts:slower  (Slow down)
+bind = SUPER ALT, space, exec, hyprland-tts ctl toggle   # @tts:toggle  (Pause / resume)
+bind = SUPER ALT, R,     exec, hyprland-tts ctl restart  # @tts:restart (Replay sentence)
