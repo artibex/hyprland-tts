@@ -75,7 +75,10 @@ cmd_hover() {
   # hard-bounded: never let a stuck/missing AT-SPI registry hang the shortcut
   local text
   text="$(timeout 1.5 "$py" "$LIBDIR/hover-read.py" "$x" "$y" "$hint" 2>/dev/null || true)"
-  [ -n "${text//[[:space:]]/}" ] || exit 0
+  if [ -z "${text//[[:space:]]/}" ]; then
+    notify "hyprland-tts: no text found" "No accessible text was found under the cursor in this app."
+    exit 0
+  fi
 
   speak_text "$text"
 }

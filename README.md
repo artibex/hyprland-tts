@@ -208,8 +208,12 @@ Hyprland actually has bound (this used to be a real bug: editing the config file
 instead of via `keybind`/the GUI could leave a shortcut silently stuck on an old key).
 No reboot or reinstall is ever needed for keybind changes — `hyprland-tts setup` (or any
 `keybind set`/`reset`/`list`) reloads Hyprland for you. If a shortcut still does nothing
-and you have `libnotify` installed, hover will pop a desktop notification when a real
-dependency (Hyprland, AT-SPI) is missing, instead of failing in total silence.
+the hover path will show a desktop notification when a real dependency (Hyprland, AT-SPI,
+mpv, Piper, socat) or a voice model is missing, instead of failing in total silence.
+
+If hover is working but the app under the cursor does not expose accessible text, you’ll
+now also get a short notification saying no text was found there. That means the shortcut
+is firing, but the current app is not exposing text through AT-SPI.
 
 ---
 

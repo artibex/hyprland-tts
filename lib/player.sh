@@ -76,13 +76,13 @@ speak_text() {
   local text="$1"
   _player_paths
 
-  have "$PIPER_BIN" || die "$PIPER_BIN not found (install piper-tts-bin)"
-  have "$MPV_BIN"   || die "$MPV_BIN not found (install mpv)"
-  have socat        || die "socat not found (install socat)"
+  have "$PIPER_BIN" || { notify "hyprland-tts: speech unavailable" "$PIPER_BIN not found (install piper-tts-bin)"; die "$PIPER_BIN not found (install piper-tts-bin)"; }
+  have "$MPV_BIN"   || { notify "hyprland-tts: speech unavailable" "$MPV_BIN not found (install mpv)"; die "$MPV_BIN not found (install mpv)"; }
+  have socat         || { notify "hyprland-tts: speech unavailable" "socat not found (install socat)"; die "socat not found (install socat)"; }
 
   local model
   model="$(resolve_model "$text")" || \
-    die "no voice model installed — run 'hyprland-tts gui' or 'hyprland-tts model install <key>'"
+    { notify "hyprland-tts: speech unavailable" "No voice model is installed yet. Run 'hyprland-tts gui' or 'hyprland-tts model install <key>'."; die "no voice model installed — run 'hyprland-tts gui' or 'hyprland-tts model install <key>'"; }
   remember_model "$model"
 
   kill_existing_daemon

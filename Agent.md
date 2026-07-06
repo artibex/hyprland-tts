@@ -167,16 +167,21 @@ theoretical).
     including in other people's open documents/messages if the pointer happens to be there.
     That's inherent to what the feature does (same as it would be for any screen reader),
     not a bug — but worth being upfront about in the README, which it now is.
+  - **No-text feedback:** when AT-SPI is working but the pointed-at app does not expose
+    text there, `cmd_hover` now sends a short notification instead of exiting silently.
+    That keeps the shortcut from looking dead on unsupported areas and makes the
+    distinction between "shortcut fired" and "app exposed nothing" visible to the user.
   - **Missing-dependency notifications (`common.sh::notify`).** A keybind-triggered action
     has no terminal to show a `die` message to — a silent failure and "the shortcut isn't
     even bound" look identical to the user. Confirmed for real: a user reported hover
     "not working" after install; the real cause turned out to be a stale/custom keybind
     (see next bullet), but while diagnosing it we realized a genuinely missing dependency
     (no AT-SPI, no `hyprctl`) would have been just as silent and just as confusing. Fixed
-    by adding `notify()` (best-effort `notify-send`, no-ops without a notification daemon)
-    and calling it from `cmd_hover`'s two dependency-missing paths — but deliberately
-    **not** from the "no text found at this point" exit, since that's an expected, frequent
-    outcome while moving the mouse around and would just be spam.
+    by adding `notify()` and using `notify-send` for desktop-visible failures, then calling
+    it from `cmd_hover`'s two dependency-missing paths as well as the shared speech path
+    when Piper/mpv/socat or any voice model is missing — but deliberately **not** from the
+    "no text found at this point" exit, since that's an expected, frequent outcome while
+    moving the mouse around and would just be spam.
   - **`tts.conf` (the generated, LIVE file) can drift from the config file `keybind list`
     reads — and `keybind list` used to just lie when that happened (real bug, fixed).**
     First diagnosed as "the user must have deliberately rebound hover to `SUPER ALT, a`,

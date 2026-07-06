@@ -75,7 +75,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # (Hyprland `exec`s them with no terminal attached) can fail in ways `die`'s
 # stderr write will never surface to the user — a silent failure looks
 # identical to "nothing happened" and "this needs a dependency I don't have".
-# Never required: no-ops if notify-send/a notification daemon isn't present.
+# Prefer notify-send when available; otherwise no-op.
 notify() {
   have notify-send || return 0
   notify-send -a "hyprland-tts" -i audio-speakers "$1" "${2:-}" >/dev/null 2>&1 || true
