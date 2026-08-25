@@ -46,6 +46,45 @@ generate_tts_conf() {
         "$(key_for_action "$a")" "${ACTION_CMD[$a]}" "$a" "${ACTION_LABEL[$a]}"
     done
   } > "$TTS_CONF"
+  generate_tts_lua
+}
+
+# "MODS, KEY" -> "MODS + KEY", the key string Hyprland's Lua config expects
+# (every modifier and the key joined with " + "). A combo without modifiers
+# (rare, all actions ship with one) yields just the key.
+_combo_to_lua_key() {
+  _split_combo "$1"
+  local mods key
+  key="$_KB_KEY"
+  mods="$(printf '%s' "$_KB_MODS" | sed 's/ / + /g')"
+  if [ -n "$mods" ]; then
+    printf '%s + %s\n' "$mods" "$key"
+  else
+    printf '%s\n' "$key"
+  fi
+}
+
+# Lua counterpart of tts.conf for Hyprland 0.55+ (Lua config parser). The
+# description carries the "@tts:<action>" marker so keybind_conflicts can tell
+# our own binds apart from foreign ones — Lua dispatchers expose a numeric id
+# as arg instead of the command string, so the legacy arg-based exclusion no
+# longer matches.
+generate_tts_lua() {
+  load_config
+  mkdir -p "$HYPR_DIR"
+  {
+    echo "-- ============================================================================"
+    echo "-- hyprland-tts — Text-to-Speech keybinds for Hyprland's Lua config (generated;"
+    echo "-- edit via 'hyprland-tts keybind set <action> \"MODS, KEY\"' or the GUI. Manual"
+    echo "-- edits are overwritten on the next keybind change.)"
+    echo "-- ============================================================================"
+    local a
+    for a in "${ACTION_ORDER[@]}"; do
+      printf 'hl.bind("%s", hl.dsp.exec_cmd("hyprland-tts %s"), { description = "@tts:%s (%s)" })\n' \
+        "$(_combo_to_lua_key "$(key_for_action "$a")")" \
+        "${ACTION_CMD[$a]}" "$a" "${ACTION_LABEL[$a]}"
+    done
+  } > "$TTS_LUA"
 }
 
 # conflicts for a combo against CURRENTLY ACTIVE Hyprland binds (excludes our own
@@ -56,12 +95,16 @@ keybind_conflicts() {
   have hyprctl || return 0
   hyprctl binds -j 2>/dev/null | awk -v RS='}' -v mask="$mask" -v key="$key" '
     /"modmask"/ {
-      m=""; k=""; d=""; a=""
+      m=""; k=""; d=""; a=""; desc=""
       if (match($0, /"modmask": *[0-9]+/))  { m=substr($0,RSTART,RLENGTH); sub(/.*: */,"",m) }
       if (match($0, /"key": *"[^"]*"/))     { k=substr($0,RSTART,RLENGTH); sub(/.*"key": *"/,"",k); sub(/"$/,"",k) }
       if (match($0, /"dispatcher": *"[^"]*"/)) { d=substr($0,RSTART,RLENGTH); sub(/.*: *"/,"",d); sub(/"$/,"",d) }
       if (match($0, /"arg": *"[^"]*"/))     { a=substr($0,RSTART,RLENGTH); sub(/.*: *"/,"",a); sub(/"$/,"",a) }
-      if (m==mask && tolower(k)==tolower(key) && a !~ /hyprland-tts/)
+      if (match($0, /"description": *"[^"]*"/)) { desc=substr($0,RSTART,RLENGTH); sub(/.*: *"/,"",desc); sub(/"$/,"",desc) }
+      # Exclude our own binds: legacy exec binds carry the command in arg,
+      # Lua binds (dispatcher __lua) expose a numeric id in arg and the
+      # "@tts:<action>" marker in description instead.
+      if (m==mask && tolower(k)==tolower(key) && a !~ /hyprland-tts/ && desc !~ /@tts:/)
         printf "%s %s -> %s %s\n", m, k, d, a
     }'
 }
@@ -84,9 +127,9 @@ cmd_keybind() {
       # regenerated file actually changed, so a normal `keybind list` with
       # nothing stale doesn't reload on every call.
       local _before _after
-      _before="$(cat "$TTS_CONF" 2>/dev/null || true)"
+      _before="$(cat "$TTS_CONF" "$TTS_LUA" 2>/dev/null || true)"
       generate_tts_conf
-      _after="$(cat "$TTS_CONF" 2>/dev/null || true)"
+      _after="$(cat "$TTS_CONF" "$TTS_LUA" 2>/dev/null || true)"
       if [ "$_before" != "$_after" ]; then
         have hyprctl && hyprctl reload >/dev/null 2>&1 || true
       fi

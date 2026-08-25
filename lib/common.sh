@@ -19,7 +19,9 @@ RUN_DIR="$XDG_RUNTIME_DIR/hyprland-tts"
 
 HYPR_DIR="$XDG_CONFIG_HOME/hypr"
 TTS_CONF="$HYPR_DIR/tts.conf"
+TTS_LUA="$HYPR_DIR/tts.lua"
 MAIN_CONF="$HYPR_DIR/hyprland.conf"
+MAIN_LUA="$HYPR_DIR/hyprland.lua"
 
 # ------------------------------------------------------------------------------
 # Tunable defaults (overridable via CONFIG_FILE)
@@ -105,6 +107,10 @@ set_config_var() {
 
 unset_config_var() {
   local key="$1" tmp
+  # Also drop the in-shell value: load_config sourced it at command start and
+  # re-sourcing the edited file cannot unset it, so generate_tts_conf would
+  # keep generating with the stale combo until the next invocation.
+  unset "$key" || true
   [ -f "$CONFIG_FILE" ] || return 0
   tmp="${CONFIG_FILE}.tmp"
   grep -v -E "^${key}=" "$CONFIG_FILE" > "$tmp" 2>/dev/null || true

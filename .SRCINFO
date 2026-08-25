@@ -1,7 +1,7 @@
 pkgbase = hyprland-tts
 	pkgdesc = Accessible, multilingual, offline Text-to-Speech for Hyprland (Piper) with smart playback controls and a voice manager
 	pkgver = 1.1.0
-	pkgrel = 1
+	pkgrel = 2
 	url = https://github.com/artibex/hyprland-tts
 	arch = any
 	license = GPL3
