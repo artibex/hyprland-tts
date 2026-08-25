@@ -64,6 +64,14 @@ _combo_to_lua_key() {
   fi
 }
 
+# Escapes a value for use inside a Lua double-quoted string, so a hand-edited
+# config value (KEY_<action>) can never turn tts.lua into invalid Lua — the
+# worst case is one unparseable keysym rejected by Hyprland at load, not a
+# broken config file.
+_lua_string_escape() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
 # Lua counterpart of tts.conf for Hyprland 0.55+ (Lua config parser). The
 # description carries the "@tts:<action>" marker so keybind_conflicts can tell
 # our own binds apart from foreign ones — Lua dispatchers expose a numeric id
@@ -81,7 +89,7 @@ generate_tts_lua() {
     local a
     for a in "${ACTION_ORDER[@]}"; do
       printf 'hl.bind("%s", hl.dsp.exec_cmd("hyprland-tts %s"), { description = "@tts:%s (%s)" })\n' \
-        "$(_combo_to_lua_key "$(key_for_action "$a")")" \
+        "$(_lua_string_escape "$(_combo_to_lua_key "$(key_for_action "$a")")")" \
         "${ACTION_CMD[$a]}" "$a" "${ACTION_LABEL[$a]}"
     done
   } > "$TTS_LUA"
@@ -153,6 +161,12 @@ cmd_keybind() {
       [ -n "$action" ] && [ -n "$combo" ] || die "usage: hyprland-tts keybind set <action> \"MODS, KEY\" [--force]"
       [ -n "${ACTION_CMD[$action]:-}" ] || die "unknown action: $action (see 'keybind list')"
       _split_combo "$combo"; [ -n "$_KB_KEY" ] || die "combo must be \"MODS, KEY\" (e.g. \"SUPER, B\")"
+      # Keep tts.lua (Lua config) safe: quotes, backslashes and control
+      # characters cannot appear in a Hyprland key string and would otherwise
+      # break out of the generated Lua string.
+      case "$combo" in
+        *'\'*|*'"'*|*[[:cntrl:]]*) die "combo contains characters not allowed in a Hyprland key string: $combo" ;;
+      esac
       if [ "$force" != "--force" ]; then
         local conflict; conflict="$(keybind_conflicts "$combo")"
         [ -z "$conflict" ] || die "combo already in use:\n$conflict\n(use --force to bind anyway)"

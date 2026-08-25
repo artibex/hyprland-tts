@@ -1,7 +1,7 @@
 # Maintainer: artibex <korbinian.maag@gmail.com>
 pkgname=hyprland-tts
 pkgver=1.1.0
-pkgrel=2
+pkgrel=3
 pkgdesc="Accessible, multilingual, offline Text-to-Speech for Hyprland (Piper) with smart playback controls and a voice manager"
 arch=('any')
 url="https://github.com/artibex/hyprland-tts"
