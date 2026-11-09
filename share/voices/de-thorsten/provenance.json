@@ -1,0 +1,12 @@
+{
+ "source_id": "dd01c488-10f3-a683-00cf-4d215f4d9b19---fb808c4d76a4ab87c1e8be920d11fd64",
+ "source_text": "Für meine Freunde und Familie war die Nachricht, dass ich meine Stimme spende nicht überraschend, da sie meine Leidenschaft für Projekte dieser Art kennen.",
+ "corpus": "Thorsten-Voice 2022.10 neutral",
+ "dur_s": 7.89,
+ "peak": 0.19,
+ "clip_frac": 0.0,
+ "snr_proxy_db": 39.1,
+ "cps": 19.6,
+ "whisper_cer": 0.0066,
+ "ref_text_origin": "corpus prompt"
+}

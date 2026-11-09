@@ -22,7 +22,8 @@ echo "================================================="
 # --- 1. Runtime dependencies --------------------------------------------------
 echo "[1/4] Checking dependencies..."
 missing=()
-for c in wl-paste piper-tts mpv socat curl awk sed grep; do
+# flock and setsid (util-linux) run the warm engine worker; find/xargs list installed voices.
+for c in wl-paste piper-tts mpv socat curl awk sed grep flock setsid find xargs; do
   command -v "$c" >/dev/null 2>&1 || missing+=("$c")
 done
 if [ "${#missing[@]}" -gt 0 ]; then
@@ -63,4 +64,6 @@ echo " Installed. Next steps:"
 echo "   1) Install a voice:   hyprland-tts gui"
 echo "                    or:  hyprland-tts model install en-ryan-high"
 echo "   2) Highlight text and press SUPER + A to speak."
+echo "   3) Optional, neural voices:  hyprland-tts engine install qwen3"
+echo "      (needs cmake git gcc make; shaderc + vulkan-icd-loader for the GPU build)"
 echo "================================================="

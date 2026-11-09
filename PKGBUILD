@@ -2,12 +2,12 @@
 pkgname=hyprland-tts
 pkgver=1.1.0
 pkgrel=3
-pkgdesc="Accessible, multilingual, offline Text-to-Speech for Hyprland (Piper) with smart playback controls and a voice manager"
+pkgdesc="Accessible, multilingual, offline Text-to-Speech for Hyprland (Piper, optional Qwen3-TTS) with smart playback controls and a voice manager"
 arch=('any')
 url="https://github.com/artibex/hyprland-tts"
 license=('GPL3')
 depends=('bash' 'piper-tts-bin' 'wl-clipboard' 'mpv' 'socat' 'procps-ng' 'curl' 'gawk' 'sed' 'grep'
-         'gtk4' 'libadwaita' 'python-gobject')
+         'util-linux' 'findutils' 'gtk4' 'libadwaita' 'python-gobject')
 optdepends=(
   'hyprland: target compositor for keybinds and the hover command'
   'tesseract: read text inside copied images (OCR)'
@@ -15,6 +15,14 @@ optdepends=(
   'perl-image-exiftool: read embedded image description metadata'
   'at-spi2-core: speak text under the mouse cursor (hyprland-tts hover)'
   'libnotify: desktop notifications when a keybind-triggered action fails silently'
+  'cmake: build the Qwen3 neural engine (hyprland-tts engine install qwen3)'
+  'git: fetch the pinned Qwen3 engine sources (hyprland-tts engine install qwen3)'
+  'gcc: compile the Qwen3 neural engine (hyprland-tts engine install qwen3)'
+  'make: compile the Qwen3 neural engine (hyprland-tts engine install qwen3)'
+  'shaderc: glslc shader compiler for the GPU (Vulkan) build of the Qwen3 engine'
+  'vulkan-icd-loader: Vulkan loader for the GPU build of the Qwen3 engine'
+  'vulkan-headers: Vulkan headers for the GPU build (pinned ones are fetched if absent)'
+  'spirv-headers: SPIR-V headers for the GPU build (pinned ones are fetched if absent)'
 )
 makedepends=('make')
 

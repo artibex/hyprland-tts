@@ -15,6 +15,13 @@ echo "================================================="
 echo "   hyprland-tts — local uninstaller"
 echo "================================================="
 
+# 0. Stop the warm Qwen3 worker (if any) so no tts-server keeps running after removal.
+if command -v hyprland-tts >/dev/null 2>&1; then
+  hyprland-tts engine stop || true
+elif [ -x "$PREFIX/bin/hyprland-tts" ]; then
+  "$PREFIX/bin/hyprland-tts" engine stop || true
+fi
+
 # 1. Remove per-user Hyprland wiring (keybinds + hyprland.conf source line).
 if command -v hyprland-tts >/dev/null 2>&1; then
   hyprland-tts uninstall || true
@@ -40,4 +47,6 @@ echo ""
 echo "================================================="
 echo " Uninstall complete."
 echo " System packages (piper-tts-bin, wl-clipboard, alsa-utils) were kept."
+echo " A Qwen3 engine (~1.3 GB) lives in ~/.local/share/hyprland-tts; delete it with"
+echo " 'hyprland-tts engine remove qwen3' BEFORE uninstalling, or rm -rf that directory."
 echo "================================================="

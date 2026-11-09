@@ -21,12 +21,19 @@ for _cand in \
 done
 [ -n "$LIBDIR" ] || { echo "hyprland-tts: cannot locate library directory" >&2; exit 1; }
 
+# Modules call back into this script (setsid ... __daemon/__worker), so they need its path.
+export HTTS_SELF="$_self"
 # shellcheck source=/dev/null
 source "$LIBDIR/common.sh"
-for _m in text router model image keybind player setup hover; do
+# Module order matters only for readability: every module defines functions, nothing runs.
+for _m in text router model image keybind engine qwen3 qwen3_install worker voices player \
+  setup hover; do
   # shellcheck source=/dev/null
   source "$LIBDIR/$_m.sh"
 done
+# pyenv.sh (language-ID helper environment) is optional so older installs keep working.
+# shellcheck source=/dev/null
+[ -f "$LIBDIR/pyenv.sh" ] && source "$LIBDIR/pyenv.sh"
 
 # --- GUI launcher -------------------------------------------------------------
 # Find a python3 that actually has the GTK bindings. A bare `python3` lookup
@@ -65,6 +72,10 @@ cmd_gui() {
   exec "$py" "$gui" "$@"
 }
 
+# usage — print the command overview.
+# Args:    none
+# Returns: 0 always; stdout: help text
+# Globals: none
 usage() {
   cat <<'EOF'
 hyprland-tts — accessible, multilingual, offline TTS for Hyprland
@@ -72,9 +83,14 @@ hyprland-tts — accessible, multilingual, offline TTS for Hyprland
 USAGE
   hyprland-tts speak                 Speak selection (or a clipboard image)
   hyprland-tts hover                 Speak text under the mouse cursor (AT-SPI, best-effort)
-  hyprland-tts stop                  Stop playback
+  hyprland-tts stop                  Stop playback (the warm engine worker keeps running)
   hyprland-tts ctl <cmd>             next|prev|restart|faster|slower|
                                      pause|resume|toggle|stop|status
+  hyprland-tts engine <sub>          status|install qwen3 [--cpu|--vulkan]
+                                     [--variant base|customvoice]|remove qwen3|
+                                     use auto|qwen3|piper|start|stop
+  hyprland-tts voice <sub>           list|add <name> <wav> <transcript>|remove <name>|
+                                     set <lang> <voice>
   hyprland-tts model <sub>           list|catalog|install|install-url|remove|default|fallback
   hyprland-tts keybind <sub>         list|set|check|reset  (rebind shortcuts safely)
   hyprland-tts gui                   Graphical voice + shortcut manager
@@ -90,21 +106,40 @@ refuse_root() {
   [ "$(id -u)" -ne 0 ] || die "Do not run hyprland-tts as root or with sudo.\nIt manages files under your own \$HOME (~/.config, ~/.local) and talks to your\nWayland session — both are wrong or unreachable as root. Run it as your normal\ndesktop user:\n  hyprland-tts $*"
 }
 
+# command_deps — run the optional language-ID environment manager when it is installed.
+# Args:    $1.. <deps subcommand arguments>
+# Returns: the subcommand's status; exits 1 when pyenv.sh is not available
+# Globals: none
+command_deps() {
+  # cmd_deps comes from the optional pyenv.sh module; absent means a pre-2.0 library set.
+  declare -F cmd_deps >/dev/null || die "'deps' is not available in this installation"
+  cmd_deps "$@"
+}
+
+# main — dispatch the subcommand named by the first argument.
+# Args:    $1 <subcommand>; $2.. <its arguments>
+# Returns: 0 on success; 1 for an unknown command
+# Globals: none
 main() {
   refuse_root "$@"
   local cmd="${1:-help}"; shift || true
+  # One line per command; the work lives in the cmd_* / command_* functions.
   case "$cmd" in
-    speak)      cmd_speak "$@" ;;
-    hover)      cmd_hover "$@" ;;
-    __daemon)   run_daemon ;;
-    ctl)        cmd_ctl "$@" ;;
-    stop)       cmd_stop ;;
-    model)      cmd_model "$@" ;;
-    keybind)    cmd_keybind "$@" ;;
-    gui)        cmd_gui "$@" ;;
-    setup)      cmd_setup ;;
-    uninstall)  cmd_uninstall ;;
-    purge)      cmd_purge ;;
+    speak)      cmd_speak "$@" ;; # read the selection aloud
+    hover)      cmd_hover "$@" ;; # read the text under the cursor
+    __daemon)   run_daemon ;; # internal: the detached player
+    __worker)   run_worker ;; # internal: the detached warm-engine worker
+    ctl)        cmd_ctl "$@" ;; # playback controls via mpv IPC
+    stop)       cmd_stop ;; # stop playback only
+    engine)     cmd_engine "$@" ;; # engine install/selection/worker
+    voice)      cmd_voice "$@" ;; # voice choice and cloning
+    deps)       command_deps "$@" ;; # optional language-ID environment
+    model)      cmd_model "$@" ;; # Piper voice manager
+    keybind)    cmd_keybind "$@" ;; # shortcut manager
+    gui)        cmd_gui "$@" ;; # graphical manager
+    setup)      cmd_setup ;; # wire keybinds into Hyprland
+    uninstall)  cmd_uninstall ;; # remove keybind wiring
+    purge)      cmd_purge ;; # remove wiring and user data
     -h|--help|help) usage ;;
     *) log "unknown command: $cmd"; usage; exit 1 ;;
   esac
