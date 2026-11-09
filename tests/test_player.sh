@@ -51,7 +51,7 @@ case_qwen3_voices_switch_per_chunk() {
   assert_contains "$log" "aiden German" "German chunk -> aiden / German"
   assert_contains "$log" "ryan English" "English chunk -> ryan / English"
   assert_eq "2" "$(cat "$HYPRLAND_TTS_RUN_DIR/render.count")" "both chunks appended to mpv"
-  assert_file "$HYPRLAND_TTS_RUN_DIR/s00000.wav" "first wav non-empty"
+  assert_file "$HYPRLAND_TTS_RUN_DIR/s00000.pcm" "first chunk (streamed) copy non-empty"
   assert_file "$HYPRLAND_TTS_RUN_DIR/s00001.wav" "second wav non-empty"
   assert_no_file "$FAKE_PIPER_LOG" "piper not used"
 }

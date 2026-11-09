@@ -196,8 +196,8 @@ speak_limit_text() {
 speak_wait_for_daemon() {
   local waited=0
   # Until the pid file exists, a following speak could not find (and stop) this daemon.
-  while [ ! -s "$PIDFILE" ] && [ "$waited" -lt 60 ]; do
-    sleep 0.05
+  while [ ! -s "$PIDFILE" ] && [ "$waited" -lt 150 ]; do
+    sleep 0.02
     waited=$((waited + 1))
   done
   # The file's existence is the success condition.
@@ -272,7 +272,7 @@ speak_notice_engine_choice() {
 # daemon_cleanup — stop the renderer and mpv, delete the audio files, remove the pid file.
 # Args:    none
 # Returns: 0 always
-# Globals: reads DAEMON_MPV_PID, DAEMON_RENDER_PID, PIDFILE, HTTS_KEEP_AUDIO; deletes WAVs
+# Globals: reads DAEMON_MPV_PID, DAEMON_RENDER_PID, PIDFILE, HTTS_KEEP_AUDIO; deletes WAVs/PCM
 daemon_cleanup() {
   # Stop the renderer and its in-flight curl/piper first, so nothing appends to a dying mpv.
   if [ -n "$DAEMON_RENDER_PID" ]; then
@@ -283,7 +283,11 @@ daemon_cleanup() {
   mpv_ipc '{"command":["quit"]}' >/dev/null 2>&1 || true
   if [ -n "$DAEMON_MPV_PID" ]; then kill "$DAEMON_MPV_PID" 2>/dev/null || true; fi
   # The spoken text and its audio are private; they must not outlive the playback.
-  [ "${HTTS_KEEP_AUDIO:-0}" = "1" ] || rm -f "$RUN_DIR"/s[0-9]*.wav "$CHUNKFILE"
+  if [ "${HTTS_KEEP_AUDIO:-0}" != "1" ]; then
+    rm -f "$RUN_DIR"/s[0-9]*.wav "$RUN_DIR"/s[0-9]*.pcm "$CHUNKFILE"
+  fi
+  # A stream interrupted by stop leaves a FIFO and a partial copy, whatever HTTS_KEEP_AUDIO says.
+  find "$RUN_DIR" -maxdepth 1 \( -type p -o -name 's[0-9]*.part' \) -delete 2>/dev/null || true
   rm -f "$PIDFILE"
 }
 
@@ -312,9 +316,9 @@ daemon_start_mpv() {
     --input-ipc-server="$MPV_SOCK" \
     --audio-pitch-correction=yes --speed="$DEFAULT_SPEED" >/dev/null 2>&1 &
   DAEMON_MPV_PID=$!
-  # Wait up to about 3 s for the socket; a dead mpv ends the wait early.
-  while [ ! -S "$MPV_SOCK" ] && kill -0 "$DAEMON_MPV_PID" 2>/dev/null && [ "$waited" -lt 60 ]; do
-    sleep 0.05
+  # Wait up to about 3 s for the socket (polled every 20 ms: it is on the path to first audio).
+  while [ ! -S "$MPV_SOCK" ] && kill -0 "$DAEMON_MPV_PID" 2>/dev/null && [ "$waited" -lt 150 ]; do
+    sleep 0.02
     waited=$((waited + 1))
   done
   # The socket's existence is the success condition.
@@ -394,7 +398,7 @@ run_daemon() {
   daemon_monitor
 }
 
-# render_worker — render each chunk and append it to mpv's playlist.
+# render_worker — render each chunk and append it to mpv's playlist (chunk 0 may stream).
 # Args:    none
 # Returns: 0 always
 # Globals: reads CHUNKFILE, RUN_DIR; writes COUNTFILE, DONEFILE
@@ -404,6 +408,11 @@ render_worker() {
   engine_prepare || true
   while IFS=$'\t' read -r lang text; do
     [ -n "$text" ] || continue
+    # The first sentence streams, so speech starts while it is still being synthesized.
+    if [ "$index" -eq 0 ] && stream_wanted && stream_first_chunk "$lang" "$text"; then
+      index=1
+      continue
+    fi
     # Zero-padded names keep the playlist order readable in a directory listing.
     wav="$RUN_DIR/s$(printf '%05d' "$index").wav"
     # append-play (not append) resumes playback if mpv already drained and went idle.
@@ -413,6 +422,8 @@ render_worker() {
       index=$((index + 1))
     fi
   done < "$CHUNKFILE"
+  # A first chunk that streamed only partly is replaced (for replay) before the run is complete.
+  stream_repair_entry
   # Chunks whose rendering failed are skipped, so the count can be below the line count.
   printf '%s\n' "$index" > "$COUNTFILE"
   touch "$DONEFILE"

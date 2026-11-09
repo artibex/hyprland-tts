@@ -6,6 +6,7 @@ generation) and, when it is, rewrites the file in place at a common loudness so 
 switch without volume jumps. Exit status: 0 ok, 3 silent or empty, 4 runaway, 5 unreadable.
 
 Usage: htts_wav.py finish FILE [--runaway-seconds S] [--no-normalise]
+       htts_wav.py gain FILE      (prints the gain in dB the normaliser would apply)
 """
 import array  # Typed sample buffers for the PCM16 and float32 payloads.
 import math  # Decibel conversions and square roots.
@@ -263,6 +264,45 @@ def finish(path, runaway_seconds=0.0, normalise=True):
     return STATUS_OK
 
 
+def gain_of_file(path):
+    """Measure the gain the normaliser would apply to a file, without touching it.
+
+    Args:
+        path: The WAV file.
+
+    Returns:
+        The gain in dB (0.0 when no change is warranted); None for an unreadable or silent file.
+    """
+    # An unreadable file has no loudness to speak of.
+    try:
+        wav = read_wav(path)
+    except WavError:
+        return None
+    # Silence cannot teach a gain either.
+    peak, speech_db = measure(wav)
+    if not wav.samples or peak < SILENT_PEAK:
+        return None
+    return choose_gain_db(peak, speech_db)
+
+
+def print_gain(path):
+    """Command line verb ``gain``: print the normaliser gain of a file.
+
+    Args:
+        path: The WAV file.
+
+    Returns:
+        STATUS_OK with the gain on stdout; STATUS_UNREADABLE (also for silence) without output.
+    """
+    gain_db = gain_of_file(path)
+    # Without a loudness there is nothing the caller could store.
+    if gain_db is None:
+        return STATUS_UNREADABLE
+    # One decimal is far below what a listener hears.
+    sys.stdout.write(f"{gain_db:.1f}\n")
+    return STATUS_OK
+
+
 def main(argv):
     """Command line entry point.
 
@@ -272,7 +312,10 @@ def main(argv):
     Returns:
         The process exit status (see the module docstring); 2 for a usage error.
     """
-    # Only one verb exists; anything else is a usage error.
+    # The cheap measuring verb needs no options.
+    if len(argv) == 2 and argv[0] == "gain":
+        return print_gain(argv[1])
+    # Otherwise only the finish verb exists; anything else is a usage error.
     if len(argv) < 2 or argv[0] != "finish":
         sys.stderr.write("usage: htts_wav.py finish FILE [--runaway-seconds S] [--no-normalise]\n")
         return 2

@@ -205,8 +205,8 @@ export HTTS_SELF="$_self"
 # shellcheck source=/dev/null
 source "$LIBDIR/common.sh"
 # Module order matters only for readability: every module defines functions, nothing runs.
-for _m in text router model image keybind engine qwen3 qwen3_install worker voices pyenv player \
-  setup hover; do
+for _m in text router model image keybind engine qwen3 qwen3_install worker voices pyenv stream \
+  player setup hover; do
   # shellcheck source=/dev/null
   source "$LIBDIR/$_m.sh"
 done

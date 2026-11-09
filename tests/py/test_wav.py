@@ -236,3 +236,46 @@ def test_command_line_exit_codes(tmp_path):
     assert subprocess.run([sys.executable, script, "finish", str(path)]).returncode == 3
     assert subprocess.run([sys.executable, script, "bogus"]).returncode == 2
     assert subprocess.run([sys.executable, script, "finish", str(path), "--bogus"]).returncode == 2
+
+
+def test_gain_verb_reports_the_normaliser_gain_without_touching_the_file(tmp_path, capsys):
+    """``gain FILE`` prints what ``finish`` would apply and leaves the file alone.
+
+    Args:
+        tmp_path: pytest temporary directory.
+        capsys: pytest stdout capture.
+
+    Returns:
+        None.
+    """
+    path = tmp_path / "quiet.wav"
+    write_tone(path, amplitude=0.05)
+    before = path.read_bytes()
+    # The verb answers with one number and the success status.
+    assert htts_wav.main(["gain", str(path)]) == htts_wav.STATUS_OK
+    printed = float(capsys.readouterr().out)
+    # The same value finish() applies (to one decimal), and the file is unchanged.
+    peak, speech_db = htts_wav.measure(htts_wav.read_wav(str(path)))
+    assert printed == pytest.approx(htts_wav.choose_gain_db(peak, speech_db), abs=0.05)
+    assert path.read_bytes() == before
+
+
+def test_gain_verb_fails_quietly_for_silent_and_unreadable_files(tmp_path, capsys):
+    """Silence and garbage have no gain: status 5 and no output.
+
+    Args:
+        tmp_path: pytest temporary directory.
+        capsys: pytest stdout capture.
+
+    Returns:
+        None.
+    """
+    silent = tmp_path / "silent.wav"
+    write_tone(silent, amplitude=0.0)
+    # A header-only file is what a failed download or a fake clip looks like.
+    garbage = tmp_path / "garbage.wav"
+    garbage.write_bytes(b"RIFFfake-reference-audio")
+    # Neither file yields a number.
+    for path in (silent, garbage, tmp_path / "missing.wav"):
+        assert htts_wav.main(["gain", str(path)]) == htts_wav.STATUS_UNREADABLE
+    assert capsys.readouterr().out == ""

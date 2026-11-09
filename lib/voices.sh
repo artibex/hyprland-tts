@@ -43,6 +43,36 @@ voice_dir_for() {
   return 1
 }
 
+# voice_gain_db — print the calibrated loudness gain of a voice (its gain_db file).
+# Args:    $1 <voice name>
+# Returns: 0 with a plain number of dB on stdout; 1 when the voice has no valid gain_db
+# Globals: reads USER_VOICES_DIR via voice_dir_for
+voice_gain_db() {
+  local dir value
+  # Built-in and unknown voices have no directory and so no calibrated gain.
+  dir="$(voice_dir_for "$1")" || return 1
+  [ -f "$dir/gain_db" ] || return 1
+  # Only the first line counts, stripped of blanks; anything but a plain number is ignored.
+  value="$(head -n 1 "$dir/gain_db" 2> /dev/null || true)"
+  value="${value//[[:space:]]/}"
+  # The number ends up on a command line, so it must be a plain signed decimal.
+  [[ "$value" =~ ^[+-]?[0-9]+([.][0-9]+)?$ ]] || return 1
+  printf '%s' "$value"
+}
+
+# voice_write_gain — estimate a new voice's gain_db from its reference clip (best effort).
+# Args:    $1 <voice directory containing ref.wav>
+# Returns: 0 always; writes gain_db only when the clip could be measured
+# Globals: none
+voice_write_gain() {
+  local python gain
+  # The estimate is a convenience; without the helper the learned gain takes over later.
+  python="$(wav_python)" || return 0
+  gain="$("$python" "$(py_helpers_dir)/htts_wav.py" gain "$1/ref.wav" 2> /dev/null)" || return 0
+  # A clone reproduces its reference's level to within a few dB, which beats a blind default.
+  [ -z "$gain" ] || printf '%s\n' "$gain" > "$1/gain_db"
+}
+
 # voice_cloned_names — list usable cloned voices and where they come from.
 # Args:    none
 # Returns: 0 always; stdout: lines "<name><TAB><user|shipped>", sorted by name
@@ -228,6 +258,8 @@ command_voice_add() {
   # The transcript sits next to the audio so ref_text can be re-registered later.
   cp -- "$transcript" "$tmp_dir/ref.txt"
   voice_write_license "$tmp_dir" "$license"
+  # The reference's loudness gives the new voice a good first-sentence gain.
+  voice_write_gain "$tmp_dir"
   voice_encode_reference "$tmp_dir" ||
     # A failed encode must leave no half-created voice behind.
     { rm -rf "$tmp_dir"; die "encoding failed (is the WAV readable?)"; }

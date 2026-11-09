@@ -203,16 +203,17 @@ qwen3_seed_field() {
 
 # qwen3_request_json — build the JSON body of one speech request.
 # Args:    $1 <text>; $2 <voice name>; $3 <language name, e.g. German>; $4 <max frames>;
-#          $5 <seed override, optional>
+#          $5 <seed override, optional>; $6 <response format wav|pcm, default wav>
 # Returns: 0 always; stdout: JSON document
 # Globals: reads QWEN_SEED (optional)
 qwen3_request_json() {
   local text
   # Escaping keeps quotes and newlines in the text from breaking the document.
   text="$(json_escape "$1")"
-  # wav = one-shot file, which is what the append-play pipeline consumes.
+  # wav = one-shot file for the append-play pipeline; pcm = the stream of the first chunk.
   printf '{"input":"%s"%s,"language":"%s",' "$text" "$(qwen3_voice_field "$2")" "$3"
-  printf '"response_format":"wav","max_new_tokens":%s%s}' "$4" "$(qwen3_seed_field "${5:-}")"
+  printf '"response_format":"%s","max_new_tokens":%s%s}' "${6:-wav}" "$4" \
+    "$(qwen3_seed_field "${5:-}")"
 }
 
 # qwen3_request_timeout — print the per-request time limit in seconds, sanitised.
@@ -318,18 +319,31 @@ qwen3_render_checked() {
   return 1
 }
 
-# qwen3_render — synthesize one chunk through the warm server into a WAV file.
-# Args:    $1 <language code>; $2 <text>; $3 <output wav path>
-# Returns: 0 on success; 1 on a server-side failure; 2 when the worker is unreachable
+# qwen3_resolve_target — find the port, voice and language name a chunk would be sent with.
+# Args:    $1 <language code>
+# Returns: 0 on success; 1 for an unsupported language or missing voice; 2 when the worker is
+#          unreachable; stdout: "<port>TAB<voice>TAB<language name>"
 # Globals: reads WORKER_DIR (and the voice settings via voice_for_lang)
-qwen3_render() {
-  local lang="$1" text="$2" out_file="$3" port voice language_name
+qwen3_resolve_target() {
+  local port voice language_name
   # A port file alone proves nothing (a killed worker leaves it, and the port may be reused):
   # the worker and its tts-server must both be alive before the user's text is sent anywhere.
   worker_pid_alive && worker_server_alive || return 2
   port="$(worker_port)" || return 2
   # Unsupported language or no usable voice: nothing the worker could fix.
-  language_name="$(qwen3_language_name "$lang")" || return 1
-  voice="$(voice_for_lang "$lang")" || { worker_log "no voice for '$lang'"; return 1; }
+  language_name="$(qwen3_language_name "$1")" || return 1
+  voice="$(voice_for_lang "$1")" || { worker_log "no voice for '$1'"; return 1; }
+  printf '%s\t%s\t%s' "$port" "$voice" "$language_name"
+}
+
+# qwen3_render — synthesize one chunk through the warm server into a WAV file.
+# Args:    $1 <language code>; $2 <text>; $3 <output wav path>
+# Returns: 0 on success; 1 on a server-side failure; 2 when the worker is unreachable
+# Globals: reads WORKER_DIR (and the voice settings via voice_for_lang)
+qwen3_render() {
+  local lang="$1" text="$2" out_file="$3" target port voice language_name
+  # The same lookup serves the streamed first chunk (see stream.sh).
+  target="$(qwen3_resolve_target "$lang")" || return $?
+  IFS=$'\t' read -r port voice language_name <<< "$target"
   qwen3_render_checked "$port" "$text" "$voice" "$lang" "$language_name" "$out_file"
 }

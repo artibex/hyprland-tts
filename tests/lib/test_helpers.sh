@@ -198,7 +198,8 @@ htts() { "$TEST_REPO_DIR/bin/hyprland-tts" "$@"; }
 lib_eval() {
   bash -c 'set -euo pipefail; LIBDIR="$1"; HTTS_SELF="$2/bin/hyprland-tts"
     source "$LIBDIR/common.sh"
-    for m in text router model image keybind engine qwen3 qwen3_install worker voices pyenv player setup hover; do
+    for m in text router model image keybind engine qwen3 qwen3_install worker voices pyenv stream \
+      player setup hover; do
       source "$LIBDIR/$m.sh"; done
     load_config; eval "$3"' _ "$TEST_LIB" "$TEST_REPO_DIR" "$1"
 }

@@ -51,6 +51,7 @@ and mirrors the voice-name rule only to enable a button; the CLI stays authorita
 | `qwen3.sh` | Qwen3 backend: pinned constants, install-tree paths, request building (`max_new_tokens` cap ∝ text length, optional seed), `qwen3_render` against the warm server, device selection, usability test. |
 | `qwen3_install.sh` | User-space install: pinned `qwentts.cpp` commit (verified after a shallow fetch), sha256-checked GGUF weights, Vulkan/CPU build (BLAS off), fetched Khronos headers when the system has none, flock-guarded. |
 | `worker.sh` | On-demand warm worker: flock-guarded start, loopback server on a random port, state in `$XDG_RUNTIME_DIR/hyprland-tts-worker` (0700), idle exit after `WORKER_IDLE_MINUTES`, `worker_ensure/kick/stop/status`. |
+| `stream.sh` | First-chunk streaming: `stream_wanted`, `stream_first_chunk` (FIFO entry in mpv + `htts_stream.py` pump), `stream_settle` (fallback / partial), `stream_repair_entry`. Called only from `render_worker`. |
 | `voices.sh` | Per-language voice choice, cloned voices (`voice list/add/remove/set`), shipped + user voice roots, latent encoding via `qwen-codec`, registration with the running server. |
 | `pyenv.sh` | Optional Python helper environment: private venv + hash-pinned `fasttext-predict`/`num2words`, fastText model download (`deps install/status/remove`), interpreter resolution. Optional: older installs lack it. |
 | `player.sh` | mpv-based smart player: `cmd_speak`, `speak_text` (shared with `hover`), `run_daemon`, `render_worker`, `cmd_ctl`, `cmd_stop` (playback only). |
@@ -67,6 +68,7 @@ Python helpers (`lib/py/`, run by the helper venv's interpreter; **not** sourced
 | `htts_split.py`, `htts_markup.py` | Sentence splitting/chunk assembly; markdown and code clean-up. |
 | `htts_norm.py`, `htts_norm_numbers.py`, `htts_norm_tokens.py`, `htts_numbers.py`, `htts_lang_{de,en,fr,es,it}.py` | Per-language normalisation (numbers via `num2words`, dates, times, currency, units, abbreviations, acronyms, command lines). |
 | `htts_wav.py` | Standard-library WAV gate: silent / runaway detection and loudness normalisation (exit 0 ok, 3 silent, 4 runaway, 5 unreadable). |
+| `htts_stream.py` | Standard-library streaming client for the first chunk: POSTs `response_format: pcm`, applies the learned per-voice gain, tees the PCM into a FIFO (mpv) and a copy, silence gate, runaway cut, idle/start timeouts (exit 0 ok, 10 no audio played, 11 partial). |
 | `requirements.txt` | Pinned, hash-checked packages for `deps install`. |
 
 The GUI (`gui/hyprland-tts-gui`, GTK4/libadwaita, one file) has four pages — Engine, Voices,
@@ -87,6 +89,7 @@ selection ─► clean up (markdown; code per paragraph)
           ─► segment per sentence (fastText, smoothed) ─► "<lang>\t<sentence>" chunks
           ─► engine_render picks the voice per chunk language
                qwen3: warm worker on 127.0.0.1 ─► htts_wav.py gate (silent/runaway → retry, loudness)
+                      chunk 0 only: PCM stream ─► FIFO ─► mpv (starts after ~0.3 s of audio)
                piper: one-shot                  (also the per-chunk fallback; one notification)
           ─► mpv playlist (append-play; instant next/prev/speed/pause over IPC)
 ```
@@ -107,6 +110,27 @@ rendered AND mpv's own reported playlist-count confirms it has actually finished
 (see the `append-play`/`COUNTFILE` gotchas in §5 — both were real, confirmed-live bugs, not
 theoretical).
 
+**First-chunk streaming (`STREAM_FIRST_CHUNK=1`, default; Qwen3 on a GPU device only).** Chunk 0
+is not rendered to a WAV first. `stream_first_chunk` makes `$RUN_DIR/s00000.pcm` a **FIFO**,
+queues it in mpv (`loadfile … append-play -1 demuxer=rawaudio,…rate=24000,…channels=1,…s16le`,
+options are stored in the playlist entry and re-applied on every replay) and runs
+`htts_stream.py`, which reads the server's chunked PCM, applies the per-voice gain and writes the
+audio into the FIFO **and** `s00000.pcm.part`. When the stream is complete the helper `rename`s
+the copy over the FIFO name (atomic; mpv keeps the old inode open), then closes the FIFO (EOF).
+So the playlist entry never changes: the first open reads the FIFO, every later open (prev,
+restart after the cache) reads the finished raw file. Loudness: the file cannot be normalised
+before it plays, so the helper applies the gain learned per voice (`stream-gain` table in
+`$XDG_STATE_HOME/hyprland-tts/`, updated after each good chunk with the gain the file gate
+would have chosen; default +6 dB for an unseen voice) with a soft limiter above 90 % of full
+scale. Outcomes (helper exit status): **0** complete; **10** nothing was played (HTTP error,
+no first byte within `STREAM_START_TIMEOUT`, silent render held back for 1 s, dead worker) →
+`stream_drop_entry` (`playlist-remove 0`, so the completion count stays true) and the normal
+render runs, hence never a double playback; **11** audio was heard but the stream died, stalled
+for `STREAM_IDLE_TIMEOUT` or ran past the runaway limit → the entry stays and, after the last
+chunk, `stream_repair_entry` renders chunk 0 normally and swaps it in for replay
+(`loadfile … insert-at 0` + `playlist-remove 1`, skipped when mpv is on entry 0). Chunks ≥ 1 are
+rendered exactly as before while chunk 0 plays.
+
 > Why this design: the old `aplay` player re-ran Piper on every speed/skip action, and that
 > synthesis latency was the "painful stop" users hit. Rendering once + mpv playback removes
 > it entirely. **Navigation granularity is a sentence** — Piper exposes no per-word timing,
@@ -117,8 +141,11 @@ theoretical).
 - Models `~/.local/share/piper-tts/<lang>/<model>.onnx` (+ `.onnx.json`)
 - Last-used `~/.local/state/piper-tts/last-model`
 - Config `~/.config/piper-tts/config` (sourced bash, see the table below)
-- Runtime `$XDG_RUNTIME_DIR/hyprland-tts/` (mpv.sock, daemon.pid, chunks, s*.wav, render.done,
-  render.count) — wiped on every speak
+- Runtime `$XDG_RUNTIME_DIR/hyprland-tts/` (mpv.sock, daemon.pid, chunks, s*.wav, `s00000.pcm`
+  (streamed chunk 0: FIFO, then raw copy), stream.log, render.done, render.count) — wiped on
+  every speak
+- State `~/.local/state/hyprland-tts/stream-gain` (`<voice><TAB><dB>` lines, learned loudness gain
+  of streamed first chunks; safe to delete)
 - Worker state `$XDG_RUNTIME_DIR/hyprland-tts-worker/` (mode 0700: pid, port, ready, last-use,
   lock, worker.log, server.log) — separate so a new speak cannot wipe it
 - Engines `~/.local/share/hyprland-tts/engines/qwentts/<commit>/` (`bin/`, models, `engine.conf`)
@@ -141,7 +168,9 @@ theoretical).
 | `QWEN_SEED` | random | Numeric sampling seed. |
 | `QWEN_START_TIMEOUT` / `QWEN_REQUEST_TIMEOUT` | 90 / 120 | Worker load / one-chunk limits (seconds). |
 | `QWEN_CODEC_DEVICE` | `CPU` | Device of the reference-clip encoder (`voice add`). |
-| `NORMALIZE_LOUDNESS` | `1` | `0` disables the `htts_wav.py` loudness step. |
+| `NORMALIZE_LOUDNESS` | `1` | `0` disables the `htts_wav.py` loudness step (and the gain of streamed chunks). |
+| `STREAM_FIRST_CHUNK` | `1` | `1` plays the first sentence while Qwen3 still generates it (GPU devices only; CPU builds never stream); `0` = render the whole chunk first. |
+| `STREAM_START_TIMEOUT` / `STREAM_IDLE_TIMEOUT` | 5 / 5 | Seconds a stream may wait for its first audio / for more audio before the chunk falls back to the normal render (first) or is kept as partial (later). |
 | `VOICE_<lang>`, `FALLBACK_VOICE`, `KEY_<action>`, `DEFAULT_SPEED`, `PIPER_BIN`, `MPV_BIN` | – | 1.x keys (Piper voices, shortcuts, tools). |
 
 Test seams and overrides (environment variables, none needed in normal use):
@@ -171,6 +200,15 @@ Test seams and overrides (environment variables, none needed in normal use):
   back to Piper with one notification per run; a dead worker is restarted once, then written off
   for the run. Measured warm Vulkan (Radeon 680M): ready 1 s, RSS ≈1.2 GB, RTF 0.65–0.77, first
   PCM 0.2 s; CPU Q8_0 RTF 1.1–1.4 (×10 worse under load), RSS 3.2–4.3 GB.
+- **First-chunk streaming** — ✅ `stream.sh` + `htts_stream.py` (see §2 "First-chunk streaming").
+  Measured on the reference box (Radeon 680M Vulkan, real engine, `--ao=null` mpv): `speak` →
+  first audible audio ≈ 1.0 s warm (range 0.9–1.1 s over 6 runs; was 2.6 s, range 2.5–2.9 s over 6 runs) and 3.2–3.7 s cold (was 4.0–4.5 s). The remaining time is text preparation +
+  daemon + mpv start (~0.36 s before the request is even sent), the server's first PCM
+  (0.1–0.25 s warm) and mpv's raw-audio demuxer, which blocks until 12000 bytes (0.25 s of
+  audio) arrived. Chunks ≥ 1 are unchanged, so the **gap after the short first sentence is
+  governed by the size of chunk 1** (render RTF ≈ 0.8): a 5 s second chunk needs ≈ 4 s to
+  render, the first only plays ≈ 2 s — streaming moves the first sound earlier but not the
+  time at which chunk 1 is ready (see README troubleshooting).
 - **On-demand worker** — ✅ binds 127.0.0.1 on a random port (**unauthenticated**: any local
   process or a web page guessing the port can make it speak, never read data — documented in the
   README privacy section), flock-guarded start (the spawned worker must not inherit the lock fd),
@@ -498,6 +536,37 @@ Test seams and overrides (environment variables, none needed in normal use):
     `Adw.AlertDialog` (≥1.5) replaces the deprecated `Adw.MessageDialog`; `create_dialog` /
     `present_dialog` cover both. The GUI cancels an install with `os.killpg` on the child's own
     session (`start_new_session=True`), so build children die with it.
+- **Streaming gotchas (don't reintroduce):**
+  - **Play the stream as raw PCM, not WAV.** mpv's `lavf` demuxer needs ≈ 1.2 s of audio from a
+    pipe before the first sample whatever `demuxer-lavf-probesize`/`analyzeduration`/
+    `buffersize`/`probe-info` say (2.3 s with defaults); `demuxer=rawaudio` starts after 0.5 s.
+    That is why the entry carries per-file `demuxer-rawaudio-*` options and the replay copy is
+    raw PCM too (the options are stored in the playlist entry and apply to the finished file).
+    `appending://` is no alternative: its end-of-stream is a 2 s timeout.
+  - **mpv's raw-audio demuxer blocks until 12000 bytes (rate/4 samples) are readable.** The
+    server's first blocks are 3840 + 7680 + 15360 bytes, so playback starts with the third block
+    (≈ 0.25 s after the first). Padding the FIFO with silence would start mpv earlier but moves
+    most of the delay into the audio (estimated gain ≈ 0.1 s, not implemented or measured).
+  - **`time-pos` is 0 right after open, before any data.** Measure "audio started" as
+    `time-pos ≥ 0.1` (and say so); `first time-pos` made the stream look instant.
+  - **`http.client` clears `conn.sock` after `getresponse()` of a closing (HTTP/1.0) response.**
+    Keep the socket from `connect()` for `settimeout`; the real server (HTTP/1.1) hides this bug,
+    the test server does not.
+  - **The helper must never exit 1 after audio was played.** Status 1 would mean "no audio":
+    the entry is dropped and the chunk re-rendered, i.e. a double playback. `run_stream` turns
+    every exception into a 10/11 settlement.
+  - **FIFO details:** open the write end with `O_NONBLOCK` (ENXIO = mpv has not opened its end
+    yet; retry for 2 s from the first audio, keep a backlog); enlarge the pipe to 1 MiB so the
+    writer outruns a paused mpv; give mpv its EOF *after* the rename; the cleanup removes FIFOs
+    and `*.part` even with `HTTS_KEEP_AUDIO=1`. A FIFO nobody reads would block `open()` of a
+    plain writer forever.
+  - **A dead entry must leave mpv's playlist** (`playlist-remove 0`), else `playlist-count` never
+    reaches `COUNTFILE` and the player never finishes.
+  - **CPU builds do not stream** (RTF 1.1–1.4: mpv would stall and re-buffer mid-sentence).
+  - **Tests:** never `pkill -f <string in your own command line>` (kills the shell); use
+    `pgrep -f "$TEST_ROOT/lib/py/htts_stream.py"` (unique per sandbox). The test server's
+    `silent_first=<n>` counts the streamed request, so `silent_first=1` silences only the stream
+    and lets the fallback request succeed.
 - **XDG compliance**; **idempotent** setup (2× setup → 1 source line; uninstall → 0 refs).
 - **Keep core shortcuts as defaults** (`SUPER+A`, `SUPER+ESCAPE`); playback controls default
   to `SUPER+ALT+…`. Hover is intentionally not bound/shown in UI for now. Exposed
@@ -554,6 +623,16 @@ scratch `$HOME` and fakes on `PATH`. Status of what's been exercised:
   detected beats fallback beats last-used; fallback cleared on model removal. *(Verified.)*
 - **Keybind** — modmask math, combo split, `tts.conf` generation, and conflict detection
   against a fake `hyprctl binds -j` (blocks; `--force` overrides). *(Verified.)*
+- **First-chunk streaming** — `tests/test_stream.sh` (real mpv via the `--ao=null` wrapper, fake
+  server that streams PCM slowly and can stall, go silent, die, run away; 63 assertions: time to
+  first append/audio, FIFO → regular file, prev/restart replay of the streamed chunk, stop
+  mid-stream (no helper, FIFO, partial file; server told), stall/silence fallback without a second
+  playlist entry, dying stream + repair swap, runaway cut, speed change mid-stream, learned
+  loudness per voice, CPU/Piper/missing-helper/off-switch keep the classic path, a new speak
+  replacing a running stream) and `tests/py/test_stream.py` (18 tests: gain table, limiter, gate,
+  FIFO/tee behaviour against a mpv-like reader, full runs against an in-process chunked server).
+  Mutation-checked in scratch copies of the repo. *(Verified.)* Real-engine numbers: README
+  "Latency".
 - **mpv player** — **real mpv (via a `--ao=null`-injecting fakebin wrapper — see the audio
   gotcha in §5) + socat + fake Piper WAVs**: speak → next/prev (instant), faster/slower
   (live speed 1.2/0.8, no restart), pause/resume, stop → clean, no orphans. *(Verified.)*
@@ -652,6 +731,7 @@ hyprland-tts/
 ├── lib/                             # THE LOGIC
 │   ├── common.sh  text.sh   router.sh  model.sh   image.sh   keybind.sh
 │   ├── engine.sh  qwen3.sh  qwen3_install.sh  worker.sh  voices.sh  pyenv.sh   # 2.0 engine layer
+│   ├── stream.sh                    # first-chunk streaming (FIFO entry + htts_stream.py pump)
 │   ├── player.sh  setup.sh  hover.sh  hover-read.py   # hover: AT-SPI, not sourced, exec'd
 │   └── py/                          # htts_*.py text helpers + requirements.txt (helper venv)
 ├── gui/hyprland-tts-gui             # GTK4/libadwaita: Engine, Voices, Language, Shortcuts (thin CLI front end)

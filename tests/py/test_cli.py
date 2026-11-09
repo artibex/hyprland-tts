@@ -11,6 +11,8 @@ import sys
 # Test framework.
 import pytest
 
+import htts_split  # lib/py is on the path via conftest.
+
 FIVE = "de,en,fr,es,it"
 # A mixed-language paragraph with numbers, code and an over-long first sentence.
 MIXED_TEXT = (
@@ -94,6 +96,41 @@ def test_first_chunk_is_short_and_later_chunks_are_bounded(helper_script, lid_mo
     chunks = segment_lines(helper_script, MIXED_TEXT)
     assert len(chunks[0][1]) <= 90
     assert all(len(text) <= 220 for _, text in chunks)
+
+
+# A German paragraph of long sentences, so that the ramp positions are all exercised.
+LONG_GERMAN = (
+    "Guten Tag und herzlich willkommen. Dies ist ein kurzer Test der neuen Sprachausgabe, die "
+    "vollständig auf diesem Rechner läuft und keine Daten in das Netz sendet. Wir prüfen, ob "
+    "mehrere Sätze nacheinander sauber gesprochen werden, und ob die Pausen dazwischen natürlich "
+    "bleiben, auch wenn der Text länger wird und viele Nebensätze enthält, die man hören kann. "
+    "Das Wetter war gestern sehr schön, heute regnet es jedoch den ganzen Tag, und die "
+    "Temperaturen sind deutlich gesunken, sodass wir die Wanderung wohl verschieben müssen. Ja. "
+    "Der Wetterbericht für morgen sagt voraus, dass es im Norden regnen wird, während im Süden "
+    "die Sonne scheint, und dass es am Wochenende wieder wärmer werden soll.\n"
+)
+
+
+def test_chunks_follow_the_ramp_and_have_no_fragments(helper_script, number_words):
+    """Chunk n fits ramp step n (plus a merged fragment); only the first chunk may be tiny.
+
+    Args:
+        helper_script: Path of htts_text.py.
+        number_words: Fixture that skips without num2words.
+
+    Returns:
+        None.
+    """
+    # One language needs no classifier model.
+    chunks = segment_lines(helper_script, LONG_GERMAN, allowed="de")
+    texts = [text for _, text in chunks]
+    # The first chunk is the unchanged 90; later ones fit their ramp step plus one merged fragment.
+    assert len(texts[0]) <= 90
+    for position, text in enumerate(texts[1:], start=1):
+        assert len(text) <= htts_split.limit_at(position, False) + htts_split.MIN_FRAGMENT - 1
+        assert len(text) >= htts_split.MIN_FRAGMENT
+    # The ramp breaks the long second sentence up: chunk 1 is well below the old 220.
+    assert len(texts[1]) <= htts_split.CHUNK_RAMP[1]
 
 
 def test_no_empty_or_punctuation_only_chunks(helper_script, lid_model):

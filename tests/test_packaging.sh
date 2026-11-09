@@ -18,6 +18,25 @@ stage_install() {
   printf '%s' "$TEST_ROOT/stage"
 }
 
+# check_shipped_gains — every shipped voice carries a plausible calibrated gain_db.
+# Args:    $1 <directory with the voice folders (installed or in the checkout)>
+# Returns: 0 always
+# Globals: none
+check_shipped_gains() {
+  local dir voice gain count=0
+  for dir in "$1"/*/; do
+    voice="$(basename "$dir")"
+    gain="$(head -n 1 "$dir/gain_db" 2>/dev/null)"
+    count=$((count + 1))
+    # A plain number inside the normaliser's range (-12 .. +14 dB).
+    [[ "$gain" =~ ^[+-]?[0-9]+([.][0-9]+)?$ ]] &&
+      awk -v g="$gain" 'BEGIN{exit !(g >= -12 && g <= 14)}' &&
+      test_pass "shipped voice $voice has gain_db $gain" ||
+      test_fail "shipped voice $voice has a valid gain_db" "(got '$gain')"
+  done
+  assert_eq "5" "$count" "five shipped voices checked"
+}
+
 # case_install_layout — all runtime files are installed (the helper requirements were once missing).
 # Args:    none
 # Returns: 0 always
@@ -28,15 +47,17 @@ case_install_layout() {
   lib="$stage/usr/lib/hyprland-tts"
   assert_file "$stage/usr/bin/hyprland-tts" "dispatcher installed"
   for module in common text router model image keybind engine qwen3 qwen3_install worker voices \
-    pyenv player setup hover; do
+    pyenv stream player setup hover; do
     assert_file "$lib/$module.sh" "module $module installed"
   done
   assert_file "$lib/py/requirements.txt" "pinned helper requirements installed (deps install needs it)"
   assert_file "$lib/py/htts_wav.py" "WAV helper installed"
+  assert_file "$lib/py/htts_stream.py" "stream helper installed"
   assert_file "$lib/hover-read.py" "hover helper installed"
   assert_file "$stage/usr/share/hyprland-tts/shipped-voices/de-thorsten/ref.spk" "shipped voice latents"
   assert_file "$stage/usr/share/hyprland-tts/shipped-voices/de-thorsten/ATTRIBUTION.md" "attribution shipped"
   assert_file "$stage/usr/share/licenses/hyprland-tts/LICENSE" "licence installed"
+  check_shipped_gains "$stage/usr/share/hyprland-tts/shipped-voices"
   [ -x "$stage/usr/bin/hyprland-tts" ] && test_pass "dispatcher is executable" || test_fail "dispatcher is executable"
 }
 

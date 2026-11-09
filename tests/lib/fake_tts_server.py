@@ -11,6 +11,7 @@ import math  # Sine tone so the fake audio is not silence.
 import json  # Request parsing and log lines.
 import os  # Environment switches and the process id.
 import signal  # Clean shutdown on SIGTERM like the real server.
+import socket  # Cutting a streamed connection like a crashing server.
 import sys  # Command-line arguments and exit codes.
 import time  # Startup delay and slow responses.
 import wave  # Writing a valid RIFF/WAV reply.
@@ -20,6 +21,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # Minimal H
 LOG_PATH = os.environ.get("FAKE_TTS_LOG", "")
 # File whose content switches behaviour per request, several words allowed:
 # ok | fail500 | slow=<s> | dur=<audio s> | amp=<0..1> | silent_first=<n> | long_first=<n>.
+# Streamed (response_format pcm) requests also honour: pcm_first=<s before the first frame> |
+# pcm_gap=<s between 80 ms frames> | pcm_die=<audio s after which the connection is cut> |
+# pcm_hang=<audio s after which the server stops sending but keeps the connection open>.
 CONTROL_PATH = os.environ.get("FAKE_TTS_CONTROL", "")
 # Device that makes the server exit at once ("any" = every device), for fallback tests.
 BAD_DEVICE = os.environ.get("FAKE_TTS_BAD_DEVICE", "")
@@ -83,6 +87,27 @@ def make_wav(seconds=0.25, amplitude=0.3):
         writer.writeframes(samples)
     # getvalue is complete once the wave writer closed.
     return buffer.getvalue()
+
+
+# Audio per streamed frame (one 12.5 Hz codec frame, like the real server's first chunks).
+FRAME_SECONDS = 0.08
+
+
+def make_pcm(first_sample, count, amplitude=0.3):
+    """Build raw 16-bit mono 24 kHz samples of the 220 Hz test tone.
+
+    Args:
+        first_sample: Index of the first sample (keeps the sine phase continuous across frames).
+        count: Number of samples.
+        amplitude: Peak amplitude 0..1 (0 gives silence).
+
+    Returns:
+        The samples as little-endian bytes.
+    """
+    # Same tone as make_wav, so streamed and file audio measure alike.
+    return b"".join(
+        int(amplitude * 32767 * math.sin(2 * math.pi * 220 * (first_sample + i) / 24000)).to_bytes(
+            2, "little", signed=True) for i in range(count))
 
 
 def mode_value(mode, key, default):
@@ -237,7 +262,71 @@ class Handler(BaseHTTPRequestHandler):
         # long_first=<n> makes the first n replies a runaway of 40 s, whatever the text was.
         if Handler.request_count <= mode_value(mode, "long_first", 0):
             seconds = 40.0
+        # pcm requests are the streamed first chunk; everything else is a one-shot file.
+        if body.get("response_format") == "pcm":
+            self.stream_pcm(mode, seconds, amplitude)
+            return
         self.send_bytes(200, "audio/wav", make_wav(seconds, amplitude))
+
+    def write_chunk(self, payload):
+        """Send one HTTP chunk and flush it so the client sees it at once.
+
+        Args:
+            payload: Chunk bytes.
+
+        Returns:
+            True when written; False when the client has gone away.
+        """
+        # Chunked framing: hex length, CRLF, data, CRLF.
+        try:
+            self.wfile.write(b"%x\r\n" % len(payload) + payload + b"\r\n")
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            return False
+        # A clean write tells the caller to carry on.
+        return True
+
+    def stream_pcm(self, mode, seconds, amplitude):
+        """Stream raw PCM in 80 ms frames with configurable delays and failures.
+
+        Args:
+            mode: Control file words (pcm_first, pcm_gap, pcm_die, pcm_hang).
+            seconds: Total audio length to send.
+            amplitude: Peak amplitude of the tone.
+
+        Returns:
+            None.
+        """
+        # The real server sends its headers together with the first frame.
+        time.sleep(mode_value(mode, "pcm_first", 0.05))
+        self.send_response(200)
+        self.send_header("Content-Type", "audio/pcm")
+        # Chunked encoding is how the real server streams without knowing the length.
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        # The number of whole frames follows from the requested audio length.
+        frame_samples = int(24000 * FRAME_SECONDS)
+        frames = int(seconds / FRAME_SECONDS)
+        # One frame per iteration; a failed write means the player stopped listening.
+        for index in range(frames):
+            if not self.write_chunk(make_pcm(index * frame_samples, frame_samples, amplitude)):
+                log_event({"event": "stream_client_gone", "frames": index})
+                return
+            # Audio sent so far decides when the failure switches trigger.
+            elapsed = (index + 1) * FRAME_SECONDS
+            # pcm_die: cut the connection without the terminating chunk, like a crash.
+            if elapsed >= mode_value(mode, "pcm_die", 1e9):
+                self.connection.shutdown(socket.SHUT_RDWR)
+                log_event({"event": "stream_died", "frames": index + 1})
+                return
+            # pcm_hang: go silent but keep the connection open (a stalled generation).
+            if elapsed >= mode_value(mode, "pcm_hang", 1e9):
+                time.sleep(60)
+                return
+            time.sleep(mode_value(mode, "pcm_gap", 0.05))
+        # The zero-length chunk ends a complete stream.
+        self.write_chunk(b"")
+        log_event({"event": "stream_end", "frames": frames})
 
     def handle_voice(self, body):
         """Log a voice registration; only Base models accept it, like the real server.

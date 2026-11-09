@@ -28,6 +28,18 @@ Neural engine, native voices per language, real language detection, full polish.
   `hyprland-tts deps install|status|remove` into a private, hash-pinned venv.
 - **Audio quality gate**: silent and runaway renders are detected and retried; loudness
   normalisation (`NORMALIZE_LOUDNESS`).
+- **First-sentence streaming** (`STREAM_FIRST_CHUNK=1`, default; Qwen3 on a GPU device): the first
+  chunk is played while the engine still generates it (`response_format: pcm` into a FIFO that
+  mpv reads as raw audio) instead of after the whole chunk was rendered. Real engine on the
+  reference box: `speak` → first audible audio ≈ 1.0 s warm (was ≈ 2.6 s) and ≈ 3.2–3.7 s cold (was 4.0–4.5 s). Replay and previous-sentence read
+  the finished copy (it replaces the FIFO under the same name); loudness comes from a gain
+  learned per voice (`~/.local/state/hyprland-tts/stream-gain`, +6 dB until learned); a stream
+  that never produces audio, stays silent for a second or stalls falls back to the normal
+  render without playing twice; a stream that dies after audio was heard is re-rendered for
+  replay; a runaway is cut at the generation cap. New keys `STREAM_FIRST_CHUNK`,
+  `STREAM_START_TIMEOUT`, `STREAM_IDLE_TIMEOUT`. CPU builds, Piper and chunks ≥ 1 are unchanged.
+  Implementation: `lib/stream.sh`, `lib/py/htts_stream.py`; tests `tests/test_stream.sh`,
+  `tests/py/test_stream.py`.
 - **Per-chunk Piper fallback** with a single notification when a Qwen3 chunk fails.
 - **GUI redesign**: pages *Engine* (status, engine choice, install with live log and Cancel,
   remove, worker start/stop, idle timeout, switch model), *Voices* (voice per language, cloned
@@ -41,6 +53,8 @@ Neural engine, native voices per language, real language detection, full polish.
 
 ### Changed
 
+- The player polls for the mpv socket and the daemon's pid file every 20 ms (was 50 ms): they sit
+  on the path to the first sentence.
 - First chunk of a speak is at most 90 characters, so speech starts faster.
 - `stop` stops playback only; `engine stop` stops the warm worker.
 - Markdown list markers are stripped only at the start of a line (fixes "am 3. Oktober" losing
@@ -57,6 +71,12 @@ Neural engine, native voices per language, real language detection, full polish.
 - The worker's local HTTP port is unauthenticated (127.0.0.1, random port): another local process
   or a web page could make the machine speak, but cannot read data.
 - Voice quality was judged by automatic transcription only; the final voice choice is by ear.
+- Streaming moves the first sound earlier but not the moment chunk 1 is ready: after a short
+  first sentence there can be a pause (measured ≈ 3 s) while the longer second chunk renders.
+- The first streamed sentence is loudness-matched with a learned per-voice gain, so it can differ
+  from the exactly normalised later sentences by a decibel or two. A voice's very first
+  streamed sentence uses the +6 dB default: measured on the reference box the German clone needs
+  +12.5 dB, the built-in voice +5…6 dB, so that one sentence can be up to ~6 dB quieter.
 
 ### Evaluated, not integrated
 

@@ -15,7 +15,7 @@ SHAREDIR = $(DESTDIR)$(PREFIX)/share/hyprland-tts
 
 # Every sourced module, in the order the dispatcher loads them.
 LIBS = common text router model image keybind engine qwen3 qwen3_install worker voices \
-       pyenv player setup hover
+       pyenv stream player setup hover
 
 # Optional documents: installed when present, so a partial checkout still builds.
 OPTIONAL_DOCS = THIRD_PARTY.md CHANGELOG.md

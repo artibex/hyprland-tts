@@ -72,11 +72,17 @@ selection ─► normalize (per language: numbers, dates, currency, abbreviation
      Agent.md, CHANGELOG.md, THIRD_PARTY.md.
    - ✅ Packaging: PKGBUILD 2.0.0 (deps, voices, license metadata), Makefile installs voices, helper
      modules and the optional docs.
+   - ✅ **4c — first-sentence streaming:** `lib/stream.sh` + `lib/py/htts_stream.py`; real engine
+     `speak` → first sound 2.6 s → 1.0 s warm (details, measurements and gotchas in README
+     *Latency* and Agent.md).
    - 🔄 **4a — coding standards for every script, bash/pytest suites, CI (shellcheck, tests, QA
      gate):** tracked by the engine/bash polish work (`tools/qa`, `make qa`).
 
 ## 4. Open items
 
+- Streaming leaves a longer pause after the short first sentence (the second chunk renders ≈ 4 s
+  while the first plays ≈ 2 s): make the router's second (and third) chunk shorter than 240
+  characters so the pipeline ramps up (not done; needs router tests and listening).
 - Land `engine variant base|customvoice`, the "loading voice…" notification and the selection size
   cap (the GUI and README already refer to them).
 - zh/ja/ko: decide between dropping and limiting them (CJK sentence splitting); the documented

@@ -14,7 +14,8 @@ engine stays as a fast fallback. 100% offline: no cloud, no telemetry, no perman
 
 - **Neural voices (new in 2.0)** — Qwen3-TTS 0.6B via [`qwentts.cpp`](https://github.com/ServeurpersoCom/qwentts.cpp)
   on the integrated GPU (Vulkan) or the CPU. Built and installed in your user directory with
-  one command; first audio about 0.2 s after the model is warm.
+  one command; the first sentence is **played while it is still being generated**, so speech
+  starts about a second after the shortcut (see *Latency*).
 - **One native voice per language** — German, English, French, Spanish and Italian voices are
   cloned from licence-clean reference clips that ship with the package. You can add your own
   (WAV + transcript) and choose a voice per language.
@@ -142,6 +143,25 @@ start, no streaming; its intelligibility (CER 0.039) is no better than Piper's (
 upstream project declared itself retired in August 2026, there is no per-language default
 voice, and its only fast variants are English-only. It is not integrated; revisit if a GPU
 backend for it matures.
+
+### Latency (shortcut → first sound)
+
+Measured with the real Vulkan engine on the reference machine (Radeon 680M), a 34-character
+first sentence (2 s of audio), mpv with a null audio output; "first sound" = mpv's playback
+position passed 0.1 s. Medians of the runs listed; the text is the six-chunk smoke test.
+
+| | Before (whole chunk first) | After (`STREAM_FIRST_CHUNK=1`) |
+|---|---|---|
+| Warm worker | 2.6 s (2.5–2.9 s, 6 runs) | **1.0 s** (0.9–1.1 s, 6 runs) |
+| Cold worker (model load + first-request warm-up) | 4.0–4.5 s (2 runs) | 3.2–3.7 s (2 runs) |
+| All six chunks played, total | 26.9 s (all 6 chunks play) | 26.5–28 s (all 6 chunks play; render-bound, unchanged) |
+
+Where the remaining ~1 s goes (warm): about 0.3–0.4 s between the key press and the request
+(`speak`'s text preparation 0.15 s, then player and mpv start), 0.05 s starting the helper,
+0.1–0.25 s until the engine's first audio, 0.3 s until mpv has the 12000 bytes (0.25 s of audio)
+its raw-audio reader insists on, and the 0.1 s the measurement itself counts as played. Streaming applies to the **first sentence
+only**; later sentences are rendered while it plays, exactly as before. CPU builds and Piper
+keep the old behaviour (a CPU build is slower than real time, so a live stream would stutter).
 
 ### Choosing an engine
 
@@ -337,6 +357,9 @@ or GUI; every key below can also be set by hand.
 | `QWEN_REQUEST_TIMEOUT` | `120` | Seconds one chunk may take before it falls back to Piper. |
 | `QWEN_CODEC_DEVICE` | `CPU` | Device used to encode a cloned voice's reference clip. |
 | `NORMALIZE_LOUDNESS` | `1` | `1` = bring every chunk to one loudness; `0` = leave audio untouched. |
+| `STREAM_FIRST_CHUNK` | `1` | `1` = play the first sentence while Qwen3 is still generating it (GPU builds only); `0` = render the whole sentence first. |
+| `STREAM_START_TIMEOUT` | `5` | Seconds the streamed first sentence may take to produce its first audio before it is rendered the normal way. |
+| `STREAM_IDLE_TIMEOUT` | `5` | Seconds without new audio mid-stream before the stream is given up (what was heard is kept). |
 | `VOICE_<lang>` | – | Default Piper voice per language (`model default`). |
 | `FALLBACK_VOICE` | – | Piper voice for undetected languages (`model fallback`). |
 | `KEY_<action>` | built-in | Shortcut override (`keybind set`). |
@@ -390,11 +413,13 @@ selection ─► clean up (markdown, code per paragraph)
           ─► segment (fastText, per sentence) ─► "<lang>\t<sentence>" chunks
           ─► engine picks the voice per chunk language
                qwen3 worker (127.0.0.1, warm) ─► quality gate (silence / runaway / loudness)
+                 first sentence: PCM stream  ─► straight into mpv while it is generated
                piper (one-shot)               ─►           ┘  (fallback for any failed chunk)
           ─► mpv playlist (instant next / prev / speed / pause over an IPC socket)
 ```
 
-Text is cleaned, split into sentences, each rendered once to a WAV and played by one mpv
+Text is cleaned, split into sentences, each rendered once to a WAV (the first one with the neural
+engine is streamed into mpv instead, see *Latency*) and played by one mpv
 instance driven over an IPC socket; that is what makes next/previous/speed/pause instant. The
 granularity is a sentence (neither engine exposes per-word timing). The neural worker is
 started on demand when you speak, and the text preparation runs while the model loads.
@@ -490,7 +515,41 @@ not installed for the chosen variant, the Base model has no cloned voice, or the
 failed (you get one "Qwen3 unavailable" notification per speak, then Piper takes over). Look
 at `$XDG_RUNTIME_DIR/hyprland-tts-worker/worker.log` and `server.log`.
 
-**The first sentence after a pause is slow.** The worker had idled out and has to load the
+**The first sentence starts early, but there is a longer pause before the second.** Streaming
+only moves the *first* sound earlier; the second sentence (up to 240 characters, about 5 s of
+audio) takes about 4 s to render while the first one plays for ~2 s, and it still starts at
+about the same moment as before (6.4 s vs 6.5 s after the shortcut in the smoke test). So the
+silence between sentence one and two grew from about 2 s to about 4 s while the speech began
+1.6 s sooner. From the third sentence on playback is as gapless as before (render time ≈ 0.8 ×
+audio time). If it bothers you, set `STREAM_FIRST_CHUNK=0`, or select text whose second sentence
+is short.
+
+**How do I see whether the first sentence was streamed?** Look at the worker log
+(`$XDG_RUNTIME_DIR/hyprland-tts-worker/worker.log`):
+`htts_stream: ok first_audio=154ms audio=2.00s wall=1.32s gain=+12.6dB` means it streamed.
+`htts_stream: no audio (<reason>)` means nothing was played and the sentence was rendered the
+normal way (reasons: `no stream: ConnectionRefusedError` = the worker was gone, `HTTP 500 …` =
+the engine refused the request, `no stream: TimeoutError` = no audio within
+`STREAM_START_TIMEOUT`, `silent render` = the engine returned a second of zeros).
+`partial … (stream broke …)`, `(request timeout)` or `(runaway length)` means the sentence was
+heard but ended early; it is re-rendered once so that "previous sentence" replays the complete
+version. No `htts_stream` line at all: streaming is off (`STREAM_FIRST_CHUNK=0`), the engine
+device is `CPU`, or Piper speaks.
+
+**The first sentence is quieter or louder than the rest.** A streamed sentence cannot be
+normalised after the fact, so it is played with a gain learned per voice from your earlier
+speaks (`~/.local/state/hyprland-tts/stream-gain`; delete it to start over). A voice's very first
+use plays with +6 dB, which is up to ~6 dB too quiet for a quiet clone (measured: the German
+clone needs +11…13 dB); afterwards it lands within about 1–2 dB of the other sentences
+(measured −20.0, −21.8, −22.8 dB against −21…−22 dB for the others; the engine's own level
+varies from run to run).
+
+**The first sentence is slow again.** `htts_stream: ok first_audio=…` in the worker log tells
+the engine's share: seconds there mean a busy iGPU or a cold model after a long idle, not the
+player. After a cold start the first request of a session is slower (≈ 1.7 s, Vulkan pipeline
+set-up). `STREAM_FIRST_CHUNK=0` restores the old path.
+
+**The first sentence is slow after a pause.** The worker had idled out and has to load the
 model (about 1 s on Vulkan, longer on CPU or a cold disk cache); a "loading voice…"
 notification shows while that happens. Warm it up in advance with
 `hyprland-tts engine start`, or raise the idle timeout in the Engine page.

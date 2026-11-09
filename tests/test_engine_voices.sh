@@ -256,4 +256,87 @@ case_customvoice_worker_registers_nothing() {
   assert_eq 0 "$(test_event_count voice)" "no registration attempts"
 }
 
+# make_real_reference — create a real (audible) 24 kHz reference wav and a transcript.
+# Args:    none
+# Returns: 0 always
+# Globals: reads TEST_ROOT
+make_real_reference() {
+  python3 -c 'import array, math, sys, wave
+a = array.array("h", [int(0.05 * 32767 * math.sin(2 * math.pi * 220 * i / 24000)) for i in range(48000)])
+w = wave.open(sys.argv[1], "wb"); w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000)
+w.writeframes(a.tobytes()); w.close()' "$TEST_ROOT/ref.wav"
+  printf 'Dies ist der Referenztext.\n' > "$TEST_ROOT/ref.txt"
+}
+
+# case_voice_gain_db_lookup — the calibrated gain of a voice is read from its gain_db file.
+# Args:    none
+# Returns: 0 always
+# Globals: none
+case_voice_gain_db_lookup() {
+  test_install_fake_engine "customvoice base"
+  make_shipped_voice de-shipped
+  local shipped="$TEST_ROOT/shipped/de-shipped/gain_db" value expected
+  # Plain numbers, signs, decimals and surrounding blanks are accepted (and trimmed).
+  for value in "10.4" "-3" "+2.5" "  5  "; do
+    printf '%s\n' "$value" > "$shipped"
+    # The lookup strips blanks, so the expectation is the value without them.
+    expected="${value//[[:space:]]/}"
+    assert_eq "$expected" "$(lib_eval 'voice_gain_db de-shipped')" "gain_db '$value' is read"
+  done
+  # Anything that is not a plain number is ignored, never evaluated.
+  for value in "abc" "1;touch $TEST_ROOT/pwned" "" "1e3" "5 dB" '$(id)'; do
+    printf '%s\n' "$value" > "$shipped"
+    lib_eval 'voice_gain_db de-shipped' >/dev/null 2>&1
+    assert_rc 1 "$?" "gain_db '$value' is rejected"
+  done
+  assert_no_file "$TEST_ROOT/pwned" "a hostile gain_db is never executed"
+  # No file, an unknown voice and the built-in voice have no calibrated gain.
+  rm -f "$shipped"
+  lib_eval 'voice_gain_db de-shipped' >/dev/null 2>&1
+  assert_rc 1 "$?" "voice without gain_db file"
+  lib_eval 'voice_gain_db nobody' >/dev/null 2>&1
+  assert_rc 1 "$?" "unknown voice"
+  lib_eval 'voice_gain_db base-default' >/dev/null 2>&1
+  assert_rc 1 "$?" "built-in voice"
+}
+
+# case_user_voice_gain_db_shadows_the_shipped_one — the user's directory wins, file by file.
+# Args:    none
+# Returns: 0 always
+# Globals: none
+case_user_voice_gain_db_shadows_the_shipped_one() {
+  test_install_fake_engine "customvoice base"
+  make_shipped_voice de-shipped
+  printf '10.4\n' > "$TEST_ROOT/shipped/de-shipped/gain_db"
+  local user_dir="$XDG_DATA_HOME/hyprland-tts/voices/de-shipped"
+  mkdir -p "$user_dir"
+  printf 's' > "$user_dir/ref.spk"; printf 'r' > "$user_dir/ref.rvq"
+  # A user clone of the same name without gain_db does not inherit the shipped voice's value.
+  lib_eval 'voice_gain_db de-shipped' >/dev/null 2>&1
+  assert_rc 1 "$?" "user voice without gain_db has none (default applies)"
+  printf '4.5\n' > "$user_dir/gain_db"
+  assert_eq "4.5" "$(lib_eval 'voice_gain_db de-shipped')" "user voice's own gain_db wins"
+}
+
+# case_voice_add_estimates_gain_from_the_reference — a new voice gets a first-use gain.
+# Args:    none
+# Returns: 0 always
+# Globals: reads TEST_REPO_DIR
+case_voice_add_estimates_gain_from_the_reference() {
+  test_install_fake_engine "customvoice base"
+  make_real_reference
+  htts voice add anna "$TEST_ROOT/ref.wav" "$TEST_ROOT/ref.txt" >/dev/null 2>&1
+  assert_rc 0 "$?" "voice add with a measurable reference"
+  local dir="$XDG_DATA_HOME/hyprland-tts/voices/anna" expected
+  expected="$(python3 "$TEST_REPO_DIR/lib/py/htts_wav.py" gain "$TEST_ROOT/ref.wav")"
+  assert_eq "$expected" "$(cat "$dir/gain_db")" "gain_db equals the normaliser gain of the clip"
+  assert_eq "$expected" "$(lib_eval 'voice_gain_db anna')" "and is what the player will use"
+  # A reference that cannot be measured still makes a working voice, just without a gain_db.
+  printf 'RIFFfake-reference-audio' > "$TEST_ROOT/ref.wav"
+  htts voice add bert "$TEST_ROOT/ref.wav" "$TEST_ROOT/ref.txt" >/dev/null 2>&1
+  assert_rc 0 "$?" "voice add with an unmeasurable reference"
+  assert_file "$XDG_DATA_HOME/hyprland-tts/voices/bert/ref.rvq" "voice complete"
+  assert_no_file "$XDG_DATA_HOME/hyprland-tts/voices/bert/gain_db" "no gain_db guessed"
+}
+
 test_run_cases

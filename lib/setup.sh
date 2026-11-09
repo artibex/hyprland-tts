@@ -202,12 +202,15 @@ purge_engine_data() {
 # cmd_purge — uninstall, then delete models, state, config, engine data, caches and runtime files.
 # Args:    $1 <optional --yes (no questions) | --keep-voices>
 # Returns: 0 always
-# Globals: reads MODELS_DIR, STATE_DIR, CONFIG_DIR, HTTS_CACHE_DIR, RUN_DIR, WORKER_DIR
+# Globals: reads MODELS_DIR, STATE_DIR, HTTS_STATE_DIR, CONFIG_DIR, HTTS_CACHE_DIR, RUN_DIR,
+#          WORKER_DIR
 cmd_purge() {
   # Uninstall also stops the player and the warm worker before their files disappear.
   cmd_uninstall
   purge_remove_dir "$MODELS_DIR" "models"
   purge_remove_dir "$STATE_DIR" "state"
+  # The learned loudness gains of streamed sentences are state too.
+  purge_remove_dir "$HTTS_STATE_DIR" "learned loudness"
   # The settings go last, after everything that read them.
   purge_remove_dir "$CONFIG_DIR" "config"
   purge_engine_data "${1:-}"

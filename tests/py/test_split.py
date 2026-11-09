@@ -268,3 +268,220 @@ def test_closing_quote_after_the_period_stays_with_its_sentence():
     # The quote used to vanish because the boundary match consumed it.
     assert htts_split.split_sentences('Er sagte "Hallo." Dann ging er. (Ja.) Ende.') == [
         'Er sagte "Hallo."', "Dann ging er.", "(Ja.)", "Ende."]
+
+
+# Measured model of the Vulkan engine (Radeon 680M): seconds of fixed cost per request,
+# render seconds per audio second, and spoken characters per second.
+REQUEST_OVERHEAD_SECONDS = 1.1
+RENDER_SECONDS_PER_AUDIO_SECOND = 0.68
+SPEECH_RATE = 15.0
+
+
+def render_seconds(characters):
+    """Estimate how long the engine needs for a chunk.
+
+    Args:
+        characters: Length of the chunk text.
+
+    Returns:
+        Seconds from the request to the finished file.
+    """
+    # Fixed request cost plus the render time of the audio the text produces.
+    audio = characters / SPEECH_RATE
+    return REQUEST_OVERHEAD_SECONDS + RENDER_SECONDS_PER_AUDIO_SECOND * audio
+
+
+def words_text(sentence_count, words=12):
+    """Build a text of identical comma-free sentences.
+
+    Args:
+        sentence_count: Number of sentences.
+        words: Words per sentence.
+
+    Returns:
+        List of (language, sentence) items.
+    """
+    # Distinct words keep the sentences readable in a failure message.
+    return [("en", " ".join(f"w{number}x{index}" for index in range(words)) + ".")
+            for number in range(sentence_count)]
+
+
+def test_ramp_starts_at_the_first_chunk_limit_and_ends_at_the_ceiling():
+    """The ramp begins with the streamed chunk's limit and ends at the old maximum.
+
+    Returns:
+        None.
+    """
+    # The first value is the unchanged 90, the last the unchanged 220.
+    assert htts_split.CHUNK_RAMP[0] == htts_split.FIRST_CHUNK_LIMIT == 90
+    assert htts_split.CHUNK_RAMP[-1] == htts_split.MAX_CHUNK == 220
+    # After chunk 0 the limits never shrink and every one is a positive integer.
+    later = htts_split.CHUNK_RAMP[1:]
+    assert list(later) == sorted(later) and all(isinstance(limit, int) for limit in later)
+
+
+def test_ramp_steps_are_ready_before_the_previous_chunk_has_finished_playing():
+    """From chunk 1 on, rendering chunk n+1 takes less time than chunk n plays.
+
+    Returns:
+        None.
+    """
+    # The model: render(len_{n+1}) <= play(len_n); chunk 1 itself cannot be hidden (see module).
+    ramp = htts_split.CHUNK_RAMP
+    for previous, following in zip(ramp[1:], ramp[2:]):
+        assert render_seconds(following) <= previous / SPEECH_RATE + 1e-9, (previous, following)
+
+
+def test_limit_at_repeats_the_last_step_and_scales_for_cjk():
+    """Positions beyond the ramp use its ceiling; CJK limits are a third, at most 60.
+
+    Returns:
+        None.
+    """
+    # Far beyond the table the ceiling applies.
+    assert htts_split.limit_at(500, False) == htts_split.MAX_CHUNK
+    # The CJK scale keeps the first chunk at 30 and the ceiling at 60 characters.
+    assert htts_split.limit_at(0, True) == htts_split.FIRST_CHUNK_LIMIT_CJK
+    assert htts_split.limit_at(500, True) == htts_split.MAX_CHUNK_CJK
+    assert all(htts_split.limit_at(i, True) <= htts_split.MAX_CHUNK_CJK for i in range(20))
+
+
+def test_every_chunk_fits_the_limit_of_its_position():
+    """Long unpunctuated text is chunked along the ramp, growing chunk by chunk.
+
+    Returns:
+        None.
+    """
+    # 120 short words in one sentence need more chunks than the ramp has steps.
+    text = " ".join(f"wort{index:03d}" for index in range(120)) + "."
+    chunks = htts_split.build_chunks([("de", text)])
+    # Chunk i never exceeds the limit of position i, and no word is lost or cut.
+    for position, (_, chunk) in enumerate(chunks):
+        assert len(chunk) <= htts_split.limit_at(position, False), (position, chunk)
+    assert " ".join(chunk for _, chunk in chunks) == text
+    # The ramp really is used: the second chunk is shorter than the ceiling.
+    assert len(chunks[1][1]) <= htts_split.CHUNK_RAMP[1]
+
+
+def test_second_chunk_is_shorter_than_it_used_to_be():
+    """A 150-character second sentence is cut at its comma so chunk 1 stays small.
+
+    Returns:
+        None.
+    """
+    # Previously the whole sentence became chunk 1 (limit 220).
+    second = ("Dies ist ein kurzer Test der neuen Sprachausgabe, die vollständig auf diesem "
+              "Rechner läuft und keine Daten ins Netz sendet, auch wenn man es nicht glaubt.")
+    chunks = htts_split.build_chunks([("de", "Guten Tag."), ("de", second)])
+    # The cut falls on a comma and keeps the clause intact.
+    assert len(chunks[1][1]) <= htts_split.CHUNK_RAMP[1] and chunks[1][1].endswith(",")
+
+
+def test_clause_boundaries_are_preferred_over_word_boundaries_in_later_chunks():
+    """Later chunks end at commas when one lies in range, not mid-clause.
+
+    Returns:
+        None.
+    """
+    # Clauses of about 40 characters, so a comma is always inside the window.
+    clause = "und dann gehen wir gemeinsam in den Park"
+    sentence = ", ".join([clause] * 8) + "."
+    chunks = htts_split.build_chunks([("de", "Start hier."), ("de", sentence)])
+    # Every chunk but the last ends at a comma.
+    assert all(chunk.endswith(",") for _, chunk in chunks[1:-1])
+
+
+def test_no_chunk_but_the_first_is_a_fragment():
+    """Cutting never leaves a tail shorter than the fragment minimum.
+
+    Returns:
+        None.
+    """
+    # Sweep the sentence length around every ramp limit, where a tiny tail used to appear.
+    for limit in htts_split.CHUNK_RAMP[:4]:
+        for extra in range(1, htts_split.MIN_FRAGMENT + 3):
+            text = " ".join(["abcdefgh"] * 60)[: limit + extra].rstrip()
+            # The first sentence is deliberately tiny; only the chunks after it are checked.
+            chunks = htts_split.build_chunks([("de", "Anfang hier."), ("de", text)])
+            assert all(len(chunk) >= htts_split.MIN_FRAGMENT for _, chunk in chunks[1:]), chunks
+
+
+def test_a_fragment_sentence_joins_the_neighbour_of_its_language_only():
+    """A tiny sentence is merged forward when it cannot go back, never across languages.
+
+    Returns:
+        None.
+    """
+    # "Ok." follows the first chunk (never extended), so it waits for the next German sentence.
+    items = [("de", "Erster Satz hier."), ("de", "Ok."),
+             ("de", "Und dann folgt ein deutlich längerer zweiter Satz, der weitergeht.")]
+    chunks = htts_split.build_chunks(items)
+    assert chunks[1][1].startswith("Ok. Und dann")
+    # A tiny sentence between two languages stays alone rather than mixing them.
+    mixed = htts_split.build_chunks([("de", "Erster Satz hier."), ("en", "Ok."),
+                                     ("de", "Und dann folgt wieder ein längerer deutscher Satz.")])
+    assert [lang for lang, _ in mixed] == ["de", "en", "de"] and mixed[1][1] == "Ok."
+
+
+def test_short_sentences_are_merged_only_up_to_the_ramp_limit_of_their_chunk():
+    """Merging stops at the limit of the chunk position, not at the old 220.
+
+    Returns:
+        None.
+    """
+    # Chunk 1 (limit 70) takes two 24-character sentences (49) but not a third (74).
+    medium = "Ein ganz kurzer Satz ok."
+    chunks = htts_split.build_chunks([("de", "Anfang hier."), ("de", medium), ("de", medium),
+                                      ("de", medium)])
+    # Every chunk stays within its own ramp limit.
+    for position, (_, chunk) in enumerate(chunks):
+        assert len(chunk) <= htts_split.limit_at(position, False), (position, chunk)
+    assert len(chunks) == 3
+
+
+def test_first_chunk_is_unchanged_by_the_ramp():
+    """Chunk 0 is still the first sentence (cut at 90), exactly as before the ramp.
+
+    Returns:
+        None.
+    """
+    # A first sentence below 90 characters is one chunk, even when much is left to say.
+    short = "Dies ist ein Satz mit etwa vierzig Zeichen."
+    assert htts_split.build_chunks([("de", short), ("de", short + " Mehr Text.")])[0][1] == short
+    # A longer one is cut at its last clause within 90 characters.
+    long_first = ("Wir sitzen heute im Garten und lesen ein Buch, während die Sonne scheint "
+                  "und die Vögel singen und der Wind weht.")
+    head = htts_split.build_chunks([("de", long_first)])[0][1]
+    assert head.endswith("Buch,") and len(head) <= 90
+
+
+def test_cjk_ramp_keeps_the_cjk_rules():
+    """CJK chunks follow a third of the ramp: first 30, second at most 23, never above 60.
+
+    Returns:
+        None.
+    """
+    # Eighty clauses of ten characters without any sentence end.
+    text = "，".join(["这是一个很长的句子啊"] * 40) + "。"
+    chunks = htts_split.build_chunks([("zh", text)])
+    # Every chunk fits the CJK limit of its position, and nothing is lost.
+    for position, (_, chunk) in enumerate(chunks):
+        assert len(chunk) <= htts_split.limit_at(position, True), (position, len(chunk))
+    assert "".join(chunk for _, chunk in chunks) == text
+    assert len(chunks[1][1]) <= 23
+
+
+@pytest.mark.parametrize("sentence_count", [1, 2, 5, 40])
+def test_no_text_is_lost_or_reordered_by_the_ramp(sentence_count):
+    """Whatever the ramp does, joining the chunks reproduces the sentences in order.
+
+    Args:
+        sentence_count: Number of identical-shaped sentences.
+
+    Returns:
+        None.
+    """
+    # Words are unique, so a lost or duplicated piece shows up in the comparison.
+    items = words_text(sentence_count)
+    chunks = htts_split.build_chunks(items)
+    assert " ".join(text for _, text in chunks) == " ".join(text for _, text in items)

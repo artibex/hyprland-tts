@@ -34,6 +34,8 @@ ENGINES_DIR="$HTTS_DATA_DIR/engines"
 USER_VOICES_DIR="$HTTS_DATA_DIR/voices"
 # Disposable caches (compiled Python bytecode, dependency check results).
 HTTS_CACHE_DIR="$XDG_CACHE_HOME/hyprland-tts"
+# Small learned values that should survive a reboot (the per-voice gain of streamed chunks).
+HTTS_STATE_DIR="$XDG_STATE_HOME/hyprland-tts"
 
 # Hyprland integration files written by `hyprland-tts setup`.
 HYPR_DIR="$XDG_CONFIG_HOME/hypr"
@@ -70,6 +72,12 @@ QWEN_START_TIMEOUT="${QWEN_START_TIMEOUT:-90}"
 NORMALIZE_LOUDNESS="${NORMALIZE_LOUDNESS:-1}"
 # Seconds one synthesis request may take before the chunk falls back to Piper.
 QWEN_REQUEST_TIMEOUT="${QWEN_REQUEST_TIMEOUT:-120}"
+# 1 = play the first sentence while the neural engine is still generating it (GPU builds only).
+STREAM_FIRST_CHUNK="${STREAM_FIRST_CHUNK:-1}"
+# Seconds a streamed first chunk may wait for its first audio, and for audio once it flows,
+# before the chunk is rendered the normal way.
+STREAM_START_TIMEOUT="${STREAM_START_TIMEOUT:-5}"
+STREAM_IDLE_TIMEOUT="${STREAM_IDLE_TIMEOUT:-5}"
 
 # --- Keybind model: actions are the single source of truth (KEY_<action> overrides) ---
 ACTION_ORDER=(speak stop next prev faster slower toggle restart)

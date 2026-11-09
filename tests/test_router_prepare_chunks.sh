@@ -194,6 +194,112 @@ test_empty_and_noise_input() {
   assert_eq "" "$output" "decoration only gives no output"
 }
 
+# ramp_text — print a German paragraph whose sentences are long enough to use every ramp step.
+# Args:    none
+# Returns: 0 always; stdout: the text
+# Globals: none
+ramp_text() {
+  printf '%s ' "Guten Tag und herzlich willkommen." \
+    "Dies ist ein kurzer Test der neuen Sprachausgabe, die vollständig auf diesem Rechner läuft" \
+    "und keine Daten in das Netz sendet, auch wenn man es zuerst nicht glauben will." \
+    "Wir prüfen, ob mehrere Sätze nacheinander sauber gesprochen werden, und ob die Pausen" \
+    "dazwischen natürlich bleiben, auch wenn der Text länger wird und viele Nebensätze enthält." \
+    "Ja." "Der Wetterbericht für morgen sagt voraus, dass es im Norden regnen wird, während" \
+    "im Süden die Sonne scheint, und dass es am Wochenende wieder wärmer werden soll."
+}
+
+# test_ramp_limit_and_cut — the ramp table and the cut helper of the bash path.
+# Args:    none
+# Returns: 0 always
+# Globals: none
+test_ramp_limit_and_cut() {
+  local text cut
+  assert_eq "90" "$(ramp_limit 0)" "ramp: chunk 0 keeps the 90 character limit"
+  assert_eq "70" "$(ramp_limit 1)" "ramp: chunk 1 is kept small (the unavoidable gap)"
+  assert_eq "220" "$(ramp_limit 99)" "ramp: positions beyond the table use the ceiling"
+  # A comma lies inside the first 60 characters: the cut is made after it.
+  text="Dies ist ein Satz mit vielen Wörtern, der an einem Komma enden soll und dann weitergeht."
+  cut="$(ramp_cut "$text" 60)"
+  assert_eq "Dies ist ein Satz mit vielen Wörtern," "${text:0:cut}" "cut: clause boundary preferred"
+  # Without any comma the cut falls on a space inside the limit.
+  text="eins zwei drei vier fünf sechs sieben acht neun zehn elf zwölf dreizehn vierzehn"
+  cut="$(ramp_cut "$text" 40)"
+  assert_le "$cut" 40 "cut: word boundary within the limit"
+  assert_eq " " "${text:cut:1}" "cut: lands on a space"
+  # A remainder that would be a fragment moves the cut left.
+  text="$(printf 'abcdefgh %.0s' {1..10})"
+  text="${text% }"
+  cut="$(ramp_cut "$text" 75)"
+  assert_le "$cut" "$((${#text} - MIN_FRAGMENT))" "cut: the tail keeps at least the fragment minimum"
+}
+
+# test_fallback_follows_the_ramp — every fallback chunk fits its ramp step, none is a fragment.
+# Args:    none
+# Returns: 0 always
+# Globals: none
+test_fallback_follows_the_ramp() {
+  local output position=0 lang text bad_limit=0 bad_fragment=0 second=""
+  use_fallback
+  output="$(ramp_text | prepare_chunks de de)"
+  while IFS=$'\t' read -r lang text; do
+    # One merged fragment may exceed the step by less than the fragment minimum.
+    [ "${#text}" -le "$(($(ramp_limit "$position") + MIN_FRAGMENT - 1))" ] ||
+      bad_limit=$((bad_limit + 1))
+    [ "$position" -eq 0 ] || [ "${#text}" -ge "$MIN_FRAGMENT" ] || bad_fragment=$((bad_fragment + 1))
+    [ "$position" -ne 1 ] || second="$text"
+    position=$((position + 1))
+  done <<< "$output"
+  assert_eq "0" "$bad_limit" "fallback ramp: every chunk fits the limit of its position"
+  assert_eq "0" "$bad_fragment" "fallback ramp: no fragment after the first chunk"
+  assert_le "${#second}" 70 "fallback ramp: chunk 1 stays small"
+  assert_match "$output" $'\n?de\tGuten Tag und herzlich willkommen\.\n' "fallback ramp: first sentence alone"
+}
+
+# test_fallback_merges_fragments — tiny sentences join a neighbour of their own language.
+# Args:    none
+# Returns: 0 always
+# Globals: none
+test_fallback_merges_fragments() {
+  local output
+  use_fallback
+  # "Ok." cannot go back into the first chunk, so it is put in front of the next sentence.
+  output="$(printf 'Erster Satz hier. Ok. Und dann folgt ein deutlich längerer Satz, der weitergeht.\n' |
+    prepare_chunks de de)"
+  assert_eq $'de\tErster Satz hier.\nde\tOk. Und dann folgt ein deutlich längerer Satz, der weitergeht.' \
+    "$output" "fallback: fragment moves forward, first chunk stays alone"
+  # Short sentences after chunk 1 are merged back as long as they fit its limit.
+  output="$(printf 'Erster Satz hier. Zweiter etwas längerer Satz hier. Ja. Nein.\n' |
+    prepare_chunks de de)"
+  assert_eq $'de\tErster Satz hier.\nde\tZweiter etwas längerer Satz hier. Ja. Nein.' "$output" \
+    "fallback: short sentences join their predecessor"
+  # Different languages are never glued together, even for a fragment.
+  output="$(printf 'Das ist der erste Satz hier. The cat is on the table. Ja.\n' |
+    prepare_chunks de,en de)"
+  assert_match "$output" $'en\tThe cat is on the table\.' "fallback: other language stays separate"
+}
+
+# test_fallback_matches_python_chunking — both paths cut plain text into identical chunks.
+# Args:    none
+# Returns: 0 always
+# Globals: none
+test_fallback_matches_python_chunking() {
+  local text via_python via_bash
+  if ! python_available; then t_skip "python/bash chunking parity"; return 0; fi
+  text="$(ramp_text)"
+  use_python
+  via_python="$(printf '%s\n' "$text" | prepare_chunks de de)"
+  use_fallback
+  via_bash="$(printf '%s\n' "$text" | prepare_chunks de de)"
+  assert_eq "$via_python" "$via_bash" "ramp text: bash fallback chunks exactly like Python"
+  # A long comma-free sentence is the hardest case for the word-boundary cuts.
+  text="$(printf 'wort%03d ' {1..90})"
+  use_python
+  via_python="$(printf '%s\n' "$text" | prepare_chunks de de)"
+  use_fallback
+  via_bash="$(printf '%s\n' "$text" | prepare_chunks de de)"
+  assert_eq "$via_python" "$via_bash" "comma-free text: bash fallback chunks exactly like Python"
+}
+
 # test_python_contract — the Python path emits a valid contract and normalised numbers.
 # Args:    none
 # Returns: 0 always
@@ -335,7 +441,11 @@ main() {
   test_fallback_single_language
   test_fallback_default_and_invalid_arguments
   test_empty_and_noise_input
+  test_ramp_limit_and_cut
+  test_fallback_follows_the_ramp
+  test_fallback_merges_fragments
   test_python_contract
+  test_fallback_matches_python_chunking
   test_python_single_language_needs_no_model
   test_python_missing_model_falls_back
   test_detect_lang
