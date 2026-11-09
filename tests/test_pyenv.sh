@@ -43,7 +43,7 @@ assert_rc() { assert_eq "$1" "$2" "$3 (exit status)"; }
 # Globals: writes SANDBOX, FIXTURE, CURL_LOG and PATH
 setup_sandbox() {
   SANDBOX="$(mktemp -d)"
-  export HOME="$SANDBOX/home" XDG_DATA_HOME="$SANDBOX/data"
+  export HOME="$SANDBOX/home" XDG_DATA_HOME="$SANDBOX/data" XDG_CACHE_HOME="$SANDBOX/cache"
   mkdir -p "$HOME" "$SANDBOX/bin"
   unset HTTS_PYTHON HTTS_LID_MODEL HTTS_PY_DIR LIBDIR
   FIXTURE="$SANDBOX/fixture.ftz"

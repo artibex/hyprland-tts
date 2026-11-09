@@ -140,7 +140,8 @@ FAKE
 test_setup() {
   TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/htts-test-XXXXXX")"
   export HOME="$TEST_ROOT/home" XDG_DATA_HOME="$TEST_ROOT/data" XDG_CONFIG_HOME="$TEST_ROOT/config"
-  export XDG_STATE_HOME="$TEST_ROOT/state"
+  # The cache is sandboxed too: purge deletes it, and CI runners leave XDG_CACHE_HOME unset.
+  export XDG_STATE_HOME="$TEST_ROOT/state" XDG_CACHE_HOME="$TEST_ROOT/cache"
   export HYPRLAND_TTS_RUN_DIR="$TEST_ROOT/run" HYPRLAND_TTS_WORKER_DIR="$TEST_ROOT/worker"
   export FAKE_TTS_LOG="$TEST_ROOT/fake-tts.jsonl" FAKE_TTS_CONTROL="$TEST_ROOT/fake-tts.control"
   export FAKE_PIPER_LOG="$TEST_ROOT/piper.log" FAKE_NOTIFY_LOG="$TEST_ROOT/notify.log"

@@ -617,6 +617,13 @@ python -m pytest tests/gui -q   # GUI, headless (see below)
 make qa                         # coding-standard gate
 ```
 
+**Sandbox every XDG variable in test setups, including `XDG_CACHE_HOME`.** The first real CI
+run failed with `XDG_CACHE_HOME: unbound variable` in `test_setup.sh`: GitHub runners leave it
+unset, while the dev desktop exports it, so locally the purge test silently used (and deleted)
+the developer's real `~/.cache/hyprland-tts`. `tests/lib/test_helpers.sh::test_setup` and the
+standalone sandboxes now export it; reproduce CI locally with
+`env -u XDG_CACHE_HOME -u XDG_RUNTIME_DIR … bash tests/run.sh`.
+
 **GUI tests (`tests/gui/test_gui.py`, 70 tests).** The module is skipped when PyGObject, GTK4,
 libadwaita or `gtk4-broadwayd` are missing. It starts a private **Broadway** daemon
 (`gtk4-broadwayd :N`, `GDK_BACKEND=broadway`, `WAYLAND_DISPLAY`/`DISPLAY` removed) so no window can
