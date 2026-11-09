@@ -15,6 +15,12 @@ declare -gA QWEN3_SHA256=(
   # The codec is needed by every variant.
   [codec]="1883beeed99348fc35e23dd225e9082f93f6f8c109330a33d935baa8acdbfd94"
 )
+# Byte size of every weight file, keyed by role; only used for progress percentages.
+declare -gA QWEN3_BYTES=(
+  [customvoice]=968588544 [base]=992615488 [codec]=291150624
+)
+# Seconds between progress lines of a download or compile run without a terminal.
+QWEN_PROGRESS_INTERVAL="${QWEN_PROGRESS_INTERVAL:-5}"
 # Khronos headers, fetched only when the system has none (pinned tag and its commit).
 VULKAN_HEADERS_REPO="https://github.com/KhronosGroup/Vulkan-Headers"
 VULKAN_HEADERS_COMMIT="88487f687f3100ebe1d3559a8a34d971ee85b977"
@@ -24,19 +30,20 @@ SPIRV_HEADERS_COMMIT="496543121ce6419f23d6fa5d7194ba66c36212d2"
 
 # qwen3_asset_lines — print the pinned weight table.
 # Args:    none
-# Returns: 0 always; stdout: lines "<role>|<file>|<sha256>"
+# Returns: 0 always; stdout: lines "<role>|<file>|<sha256>|<bytes>"
 # Globals: reads QWEN3_SHA256, HTTS_TEST_ASSET_TABLE (test seam: alternative table file)
 qwen3_asset_lines() {
   local role
   # The test seam lets the suite exercise the installer with tiny fixture files.
   if [ -n "${HTTS_TEST_ASSET_TABLE:-}" ]; then cat -- "$HTTS_TEST_ASSET_TABLE"; return 0; fi
   for role in customvoice base codec; do
-    printf '%s|%s|%s\n' "$role" "$(qwen3_model_file "$role")" "${QWEN3_SHA256[$role]}"
+    printf '%s|%s|%s|%s\n' "$role" "$(qwen3_model_file "$role")" "${QWEN3_SHA256[$role]}" \
+      "${QWEN3_BYTES[$role]}"
   done
 }
 
 # qwen3_asset_field — read one column of a role's row in the weight table.
-# Args:    $1 <role>; $2 <field number: 2=file 3=sha256>
+# Args:    $1 <role>; $2 <field number: 2=file 3=sha256 4=bytes>
 # Returns: 0 when the role exists; 1 otherwise; stdout: the field value
 # Globals: none
 qwen3_asset_field() {
@@ -72,6 +79,8 @@ qwen3_url_protocols() {
 # Returns: 0 when allowed; 1 otherwise
 # Globals: reads HTTS_QWEN_ASSET_BASE
 qwen3_url_allowed() {
+  # LC_ALL=C keeps the character ranges ASCII-only (UTF-8 ranges would also match letters like "ä").
+  local LC_ALL=C
   # https is always fine; local fixtures only count when the test seam is set.
   [[ "$1" =~ ^https://[A-Za-z0-9._~:/?#@!$\&\'\(\)\*\+,\;=%-]+$ ]] && return 0
   [ -n "${HTTS_QWEN_ASSET_BASE:-}" ] && [[ "$1" =~ ^(file:///|http://127\.0\.0\.1[:/]) ]]
@@ -88,19 +97,60 @@ qwen3_file_sha256() {
   printf '%s' "${digest%% *}"
 }
 
+# qwen3_megabytes — format a byte count as whole megabytes.
+# Args:    $1 <bytes>
+# Returns: 0 always; stdout: e.g. "512 MB"
+# Globals: none
+qwen3_megabytes() {
+  printf '%s MB' "$(( ${1:-0} / 1048576 ))"
+}
+
+# qwen3_progress_line — print one download progress line to stderr.
+# Args:    $1 <label>; $2 <part file>; $3 <expected bytes or 0>
+# Returns: 0 always
+# Globals: none
+qwen3_progress_line() {
+  local size
+  size="$(stat -c %s "$2" 2>/dev/null || echo 0)"
+  # With a known total the line carries a percentage the GUI can turn into a bar.
+  if [ "${3:-0}" -gt 0 ]; then
+    log "  progress: $1 $(qwen3_megabytes "$size") of $(qwen3_megabytes "$3")" \
+      "($(( size * 100 / $3 ))%)"
+  else
+    log "  progress: $1 $(qwen3_megabytes "$size")"
+  fi
+}
+
+# qwen3_curl_download — run the download; on a terminal with curl's bar, else with progress lines.
+# Args:    $1 <url>; $2 <part file>; $3 <expected bytes or 0>
+# Returns: curl's exit status
+# Globals: reads QWEN_PROGRESS_INTERVAL
+qwen3_curl_download() {
+  local curl_pid
+  local -a curl_args=(-fL --retry 3 --connect-timeout 20 --proto "$(qwen3_url_protocols)"
+    --proto-redir '=https' -C - -o "$2" "$1")
+  # A terminal gets curl's own progress bar; everything else gets one line per interval.
+  if [ -t 2 ]; then curl --progress-bar "${curl_args[@]}"; return; fi
+  curl -sS "${curl_args[@]}" &
+  curl_pid=$!
+  # Report only while the transfer is still running.
+  while kill -0 "$curl_pid" 2>/dev/null; do
+    sleep "$QWEN_PROGRESS_INTERVAL"
+    # The download may finish during the sleep; only report while it still runs.
+    ! kill -0 "$curl_pid" 2>/dev/null || qwen3_progress_line "$(basename "$2" .part)" "$2" "$3"
+  done
+  wait "$curl_pid"
+}
+
 # qwen3_fetch_verified — download a file over https and keep it only if the SHA-256 matches.
-# Args:    $1 <url>; $2 <expected sha256>; $3 <destination path>
+# Args:    $1 <url>; $2 <expected sha256>; $3 <destination path>; $4 <expected bytes, optional>
 # Returns: 0 when stored; exits 1 via die on a bad URL, failed download or hash mismatch
 # Globals: reads HTTS_QWEN_ASSET_BASE
 qwen3_fetch_verified() {
-  local url="$1" expected="$2" dest="$3" part="$3.part" actual progress="-sS"
+  local url="$1" expected="$2" dest="$3" part="$3.part" actual
   qwen3_url_allowed "$url" || die "refusing non-https or malformed URL: $url"
-  # A progress bar helps on a terminal; in logs and the GUI it would only be noise.
-  [ -t 2 ] && progress="--progress-bar"
   # --proto-redir keeps a hostile redirect from downgrading to http; -C - resumes a part file.
-  curl -fL "$progress" --retry 3 --connect-timeout 20 --proto "$(qwen3_url_protocols)" \
-    --proto-redir '=https' -C - -o "$part" "$url" ||
-    { rm -f "$part"; die "download failed: $url"; }
+  qwen3_curl_download "$url" "$part" "${4:-0}" || { rm -f "$part"; die "download failed: $url"; }
   actual="$(qwen3_file_sha256 "$part")" || die "cannot hash $part"
   # A mismatch means a corrupted or substituted file: never let it into place.
   [ "$actual" = "$expected" ] || { rm -f "$part"; die "sha256 mismatch for $(basename "$dest")"; }
@@ -125,7 +175,8 @@ qwen3_download_model() {
   fi
   # Progress feedback: the files are several hundred megabytes.
   log "  downloading $file_name ..."
-  qwen3_fetch_verified "$(qwen3_asset_base)/$file_name" "$expected" "$target"
+  qwen3_fetch_verified "$(qwen3_asset_base)/$file_name" "$expected" "$target" \
+    "$(qwen3_asset_field "$1" 4 || echo 0)"
 }
 
 # qwen3_parse_install_args — validate the arguments of `engine install`.
@@ -280,6 +331,18 @@ qwen3_build_jobs() {
   printf '%s' "$jobs"
 }
 
+# qwen3_collect_header_args — append the cmake arguments for fetched Vulkan headers to an array.
+# Args:    $1 <work directory>; $2 <name of the array to append to>
+# Returns: 0 on success; exits 1 via die when the headers cannot be prepared
+# Globals: writes the named array
+qwen3_collect_header_args() {
+  local header_output
+  local -n target_array="$2"
+  # Captured first: a die inside a process substitution would only end that subshell.
+  header_output="$(qwen3_prepare_vulkan_headers "$1")" || die "could not prepare the Vulkan headers"
+  [ -z "$header_output" ] || mapfile -t -O "${#target_array[@]}" target_array <<< "$header_output"
+}
+
 # qwen3_compile — configure and build tts-server and qwen-codec from a source checkout.
 # Args:    $1 <source dir>; $2 <build: cpu|vulkan>; $3 <work dir>
 # Returns: 0 on success; exits 1 via die on a build error
@@ -290,17 +353,46 @@ qwen3_compile() {
   local common_args=(-DCMAKE_BUILD_TYPE=Release -DGGML_BLAS=OFF "-DCMAKE_BUILD_RPATH=\$ORIGIN")
   # The Vulkan variant needs headers, which may have to be fetched first.
   if [ "$build" = "vulkan" ]; then
-    mapfile -t extra_args < <(qwen3_prepare_vulkan_headers "$work")
-    extra_args+=(-DGGML_VULKAN=ON)
+    extra_args=("-DGGML_VULKAN=ON")
+    qwen3_collect_header_args "$work" extra_args
   fi
   # Configuration prints a lot, so it goes to a log and only a summary is shown.
   log "  configuring ($build) ..."
   cmake -S "$source_dir" -B "$build_dir" "${common_args[@]}" "${extra_args[@]}" \
     >"$work/cmake.log" 2>&1 || die "cmake configure failed, see $work/cmake.log"
   log "  compiling with $(qwen3_build_jobs) jobs (several minutes) ..."
+  # The build log, not the terminal, carries the compiler output.
+  qwen3_build_with_heartbeat "$build_dir" "$work/build.log" ||
+    die "build failed, see $work/build.log"
+}
+
+# qwen3_build_percent — read the last "[ 42%]" marker out of a cmake build log.
+# Args:    $1 <build log>
+# Returns: 0 always; stdout: the percentage number, empty when none was printed yet
+# Globals: none
+qwen3_build_percent() {
+  grep -o '^\[ *[0-9]*%\]' "$1" 2>/dev/null | tail -n1 | sed 's/[^0-9]//g' || true
+}
+
+# qwen3_build_with_heartbeat — build tts-server and qwen-codec, reporting progress every interval.
+# Args:    $1 <build dir>; $2 <build log>
+# Returns: cmake's exit status
+# Globals: reads QWEN_PROGRESS_INTERVAL
+qwen3_build_with_heartbeat() {
+  local build_pid started
+  started="$(epoch_now)"
   # Only the two tools we ship are built, which skips tests and examples.
-  cmake --build "$build_dir" --target tts-server qwen-codec -j "$(qwen3_build_jobs)" \
-    >"$work/build.log" 2>&1 || die "build failed, see $work/build.log"
+  cmake --build "$1" --target tts-server qwen-codec -j "$(qwen3_build_jobs)" >"$2" 2>&1 &
+  build_pid=$!
+  while kill -0 "$build_pid" 2>/dev/null; do
+    # One line per interval keeps a streaming GUI informed.
+    sleep "$QWEN_PROGRESS_INTERVAL"
+    # A line per interval shows a streaming GUI that the long compile is still alive.
+    ! kill -0 "$build_pid" 2>/dev/null ||
+      log "  progress: compiling ${1##*/} ... $(qwen3_build_percent "$2")%" \
+        "($(( $(epoch_now) - started ))s)"
+  done
+  wait "$build_pid"
 }
 
 # qwen3_publish_binaries — copy the built tools and shared libraries into the engine's bin/.
@@ -314,6 +406,8 @@ qwen3_publish_binaries() {
   if [ ! -x "$build_dir/tts-server" ] || [ ! -x "$build_dir/qwen-codec" ]; then
     die "build produced no binaries"
   fi
+  # A running server maps these files; copying over them would fail ("Text file busy") or crash it.
+  worker_stop
   mkdir -p "$bin_dir"
   # Libraries first and symlinks preserved (-P), the server last: it marks "installed".
   cp -P "$build_dir"/libggml*.so* "$bin_dir/" 2>/dev/null || true
@@ -389,6 +483,24 @@ qwen3_resolve_build() {
   esac
 }
 
+# qwen3_select_after_install — select a freshly installed variant, but only on the first install.
+# Args:    $1 <variant just installed>
+# Returns: 0 always
+# Globals: reads CONFIG_FILE; writes QWEN_VARIANT in the config file on a first install
+# Notes:   A later install of the other talker must not silently change the voices in use.
+qwen3_select_after_install() {
+  # No stored choice yet, or the stored one is the one just installed: store it.
+  if ! grep -q '^QWEN_VARIANT=' "$CONFIG_FILE" 2>/dev/null || [ "$1" = "$QWEN_VARIANT" ]; then
+    QWEN_VARIANT="$1"
+    set_config_var QWEN_VARIANT "$1"
+    # The new variant is active now.
+    return 0
+  fi
+  # The active talker stays; the user switches deliberately.
+  log "Installed variant $1; the active variant stays $QWEN_VARIANT" \
+    "(switch: hyprland-tts engine variant $1)"
+}
+
 # command_engine_install — implement `engine install qwen3 [--cpu|--vulkan] [--variant V]`.
 # Args:    $1 <qwen3>; then options as described
 # Returns: 0 on success; exits 1 via die on any failure
@@ -410,9 +522,8 @@ command_engine_install() {
   qwen3_download_model "$variant"
   qwen3_download_model codec
   qwen3_build_engine "$build"
-  # Update the running shell too so the summary below matches the config.
-  QWEN_VARIANT="$variant"
-  set_config_var QWEN_VARIANT "$variant"
+  # Select the variant only if the user had not chosen another one.
+  qwen3_select_after_install "$variant"
   log "Done. Engine at $(qwen3_engine_dir). Run: hyprland-tts engine status"
 }
 

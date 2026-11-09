@@ -7,7 +7,7 @@ be more code and more bugs, so this module only adds the small fixes the library
 English commas, "ein" before a noun, and a graceful fallback when the library is absent.
 """
 
-# Annotations stay lazy so no typing import is needed at runtime.
+# Postponed annotations let list[str] and X | None work on Python 3.9 too.
 from __future__ import annotations
 
 # Import machinery used to load a single num2words language module.

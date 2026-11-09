@@ -1,6 +1,6 @@
 """German normalisation rules: words, abbreviations, currency, units, dates and times."""
 
-# Annotations stay lazy so no typing import is needed at runtime.
+# Postponed annotations let list[str] and X | None work on Python 3.9 too.
 from __future__ import annotations
 
 import htts_numbers
@@ -16,6 +16,10 @@ MINUS_WORD = "minus"
 PERCENT_WORD = "Prozent"
 # German writes ordinals as a number followed by a period ("3. Oktober").
 DOTTED_ORDINALS = True
+# Words after which "5." is a page or item number ("S. 5."), never an ordinal.
+REFERENCE_WORDS = frozenset(
+    "s seite seiten kap kapitel nr abb tab art abs absatz bd band".split()
+)
 # Suffix notation for ordinals does not exist in German.
 ORDINAL_SUFFIX = None
 # Years from 1100 to 1999 are spoken in hundreds ("neunzehnhundert...").

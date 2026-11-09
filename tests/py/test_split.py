@@ -173,3 +173,98 @@ def test_symbol_before_a_period_still_ends_the_sentence():
     # "12 %." and "5 €." end sentences; "A." (an initial) does not.
     assert len(htts_split.split_sentences("Es sind 12 %. Ciao a tutti, come state?")) == 2
     assert len(htts_split.split_sentences("Das kostet 5 €. Danach gehen wir heim.")) == 2
+
+
+# CJK text with full-width punctuation and no spaces.
+CJK_TEXT = "今天天气很好。我们去公园散步吧！你觉得怎么样？好的，那就出发。"
+
+
+def test_cjk_sentence_ends_split_without_spaces():
+    """Full-width terminators end sentences although no space follows them.
+
+    Returns:
+        None.
+    """
+    # Four sentences, each ending in its own full stop, exclamation or question mark.
+    assert htts_split.split_sentences(CJK_TEXT) == [
+        "今天天气很好。", "我们去公园散步吧！", "你觉得怎么样？", "好的，那就出发。"]
+
+
+def test_cjk_closing_quote_stays_with_its_sentence():
+    """A closing corner bracket after the full stop belongs to the sentence before.
+
+    Returns:
+        None.
+    """
+    # The bracket must not start the next sentence.
+    assert htts_split.split_sentences("他说「走吧。」然后离开了。") == ["他说「走吧。」", "然后离开了。"]
+
+
+def test_cjk_chunks_are_short_and_cut_at_commas():
+    """A long CJK sentence without spaces is wrapped at full-width commas, never past 60.
+
+    Returns:
+        None.
+    """
+    # Twenty clauses of ten characters each form one 220-character sentence.
+    text = "，".join(["这是一个很长的句子啊"] * 20) + "。"
+    chunks = htts_split.build_chunks([("zh", text)])
+    # Every chunk fits the CJK limit and no text is lost.
+    assert all(len(chunk) <= htts_split.MAX_CHUNK_CJK for _, chunk in chunks)
+    assert "".join(chunk for _, chunk in chunks) == text
+    # The first chunk is short for a fast start and ends at a comma boundary.
+    assert len(chunks[0][1]) <= htts_split.FIRST_CHUNK_LIMIT_CJK
+    assert chunks[0][1].endswith("，")
+
+
+def test_latin_limits_are_unchanged_for_latin_text():
+    """Latin text keeps the 220-character chunk limit.
+
+    Returns:
+        None.
+    """
+    # A text of 200 characters in one sentence is not wrapped.
+    sentence = ("word " * 40).strip() + "."
+    assert htts_split.wrap_long(sentence) == [sentence]
+
+
+def test_very_long_single_line_is_linear():
+    """A 1 MB line without sentence ends is chunked in well under a few seconds.
+
+    Returns:
+        None.
+    """
+    import time
+    # 200k words on one line used to take minutes (quadratic clause search).
+    text = "wort " * 200_000
+    started = time.perf_counter()
+    chunks = htts_split.build_chunks([("de", text)])
+    # Linear time: far below the old behaviour; the bound is generous for slow CI machines.
+    assert time.perf_counter() - started < 8
+    assert all(len(chunk) <= htts_split.MAX_CHUNK for _, chunk in chunks)
+
+
+def test_long_line_with_many_sentences_is_linear():
+    """100k short sentences on one line are split in reasonable time.
+
+    Returns:
+        None.
+    """
+    import time
+    text = "Das ist ein Satz. " * 100_000
+    started = time.perf_counter()
+    sentences = htts_split.split_sentences(text)
+    # Every sentence is found, in linear time.
+    assert len(sentences) == 100_000
+    assert time.perf_counter() - started < 8
+
+
+def test_closing_quote_after_the_period_stays_with_its_sentence():
+    """A closing quote or bracket after the final period is kept, not dropped.
+
+    Returns:
+        None.
+    """
+    # The quote used to vanish because the boundary match consumed it.
+    assert htts_split.split_sentences('Er sagte "Hallo." Dann ging er. (Ja.) Ende.') == [
+        'Er sagte "Hallo."', "Dann ging er.", "(Ja.)", "Ende."]

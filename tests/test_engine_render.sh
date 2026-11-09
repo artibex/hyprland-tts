@@ -44,6 +44,110 @@ case_frame_cap_scales_with_text() {
   assert_eq 400 "$(lib_eval "qwen3_max_frames \"\$(printf 'x%.0s' \$(seq 240))\"")" "240 chars -> 400"
 }
 
+# wav_peak — print the peak amplitude (0..1) of a 16-bit WAV file.
+# Args:    $1 <wav path>
+# Returns: 0 always; stdout: peak with two decimals
+# Globals: none
+wav_peak() {
+  python3 -c 'import array,sys,wave
+w=wave.open(sys.argv[1]); a=array.array("h"); a.frombytes(w.readframes(w.getnframes()))
+print("%.2f" % (max(abs(x) for x in a)/32768))' "$1"
+}
+
+# case_silent_render_is_retried_with_new_seed — a silent reply is rejected and retried once.
+# Args:    none
+# Returns: 0 always
+# Globals: none
+case_silent_render_is_retried_with_new_seed() {
+  test_install_fake_engine
+  htts engine start >/dev/null 2>&1
+  echo "silent_first=1" > "$FAKE_TTS_CONTROL"
+  lib_eval "qwen3_render en 'Hello there.' '$TEST_ROOT/a.wav'"
+  assert_rc 0 "$?" "second attempt succeeds"
+  assert_eq 2 "$(test_event_count speech)" "exactly one retry"
+  assert_contains "$(grep '"speech"' "$FAKE_TTS_LOG" | head -n1)" '"seed": null' "first try unseeded"
+  assert_not_contains "$(grep '"speech"' "$FAKE_TTS_LOG" | tail -n1)" '"seed": null' "retry uses a new seed"
+  assert_eq "0.13" "$(wav_peak "$TEST_ROOT/a.wav")" "the good audio was kept (and normalised)"
+}
+
+# case_two_silent_renders_fall_back_to_piper — no third try; Piper speaks the chunk.
+# Args:    none
+# Returns: 0 always
+# Globals: none
+case_two_silent_renders_fall_back_to_piper() {
+  test_install_fake_engine
+  test_add_piper_voice en
+  htts engine start >/dev/null 2>&1
+  echo "silent_first=2" > "$FAKE_TTS_CONTROL"
+  mkdir -p "$HYPRLAND_TTS_RUN_DIR"
+  lib_eval "engine_render en 'Hello there.' '$TEST_ROOT/a.wav'"
+  assert_rc 0 "$?" "chunk still rendered"
+  assert_eq 2 "$(test_event_count speech)" "qwen3 tried twice only"
+  assert_eq 1 "$(wc -l < "$FAKE_PIPER_LOG")" "piper took over"
+}
+
+# case_runaway_render_is_retried — audio far beyond the text length is rejected and retried.
+# Args:    none
+# Returns: 0 always
+# Globals: none
+case_runaway_render_is_retried() {
+  test_install_fake_engine
+  htts engine start >/dev/null 2>&1
+  echo "long_first=1" > "$FAKE_TTS_CONTROL"
+  lib_eval "qwen3_render en 'Short text.' '$TEST_ROOT/a.wav'"
+  assert_rc 0 "$?" "retry after the runaway succeeds"
+  assert_eq 2 "$(test_event_count speech)" "one retry"
+  assert_contains "$(cat "$HYPRLAND_TTS_WORKER_DIR/worker.log")" "rejected by the audio check (status 4)" "logged"
+}
+
+# case_loudness_is_normalised — quiet and loud renders end up at about the same level.
+# Args:    none
+# Returns: 0 always
+# Globals: none
+case_loudness_is_normalised() {
+  test_install_fake_engine
+  htts engine start >/dev/null 2>&1
+  echo "amp=0.10" > "$FAKE_TTS_CONTROL"
+  lib_eval "qwen3_render en 'Quiet voice.' '$TEST_ROOT/quiet.wav'"
+  echo "amp=0.30" > "$FAKE_TTS_CONTROL"
+  lib_eval "qwen3_render en 'Loud voice.' '$TEST_ROOT/loud.wav'"
+  assert_eq "$(wav_peak "$TEST_ROOT/loud.wav")" "$(wav_peak "$TEST_ROOT/quiet.wav")" "same peak after gain"
+}
+
+# case_normalisation_can_be_switched_off — NORMALIZE_LOUDNESS=0 leaves the audio untouched.
+# Args:    none
+# Returns: 0 always
+# Globals: none
+case_normalisation_can_be_switched_off() {
+  test_install_fake_engine
+  htts engine start >/dev/null 2>&1
+  echo "amp=0.10" > "$FAKE_TTS_CONTROL"
+  NORMALIZE_LOUDNESS=0 lib_eval "qwen3_render en 'Quiet voice.' '$TEST_ROOT/quiet.wav'"
+  assert_eq "0.10" "$(wav_peak "$TEST_ROOT/quiet.wav")" "untouched when disabled"
+}
+
+# case_base_default_voice_sends_no_voice — a language without clone asks for the built-in voice.
+# Args:    none
+# Returns: 0 always
+# Globals: none
+case_base_default_voice_sends_no_voice() {
+  test_install_fake_engine base
+  htts engine start >/dev/null 2>&1
+  lib_eval "qwen3_render pt 'Ola mundo.' '$TEST_ROOT/a.wav'"
+  assert_rc 0 "$?" "render without a voice"
+  assert_eq "None Portuguese 55" "$(test_speech_log)" "no voice member in the request"
+}
+
+# case_frame_cap_for_logographic_text — Chinese and Japanese get a larger cap per character.
+# Args:    none
+# Returns: 0 always
+# Globals: none
+case_frame_cap_for_logographic_text() {
+  assert_eq 48 "$(lib_eval "qwen3_max_frames '你好' zh")" "zh: 4 frames per character"
+  assert_eq 46 "$(lib_eval "qwen3_max_frames '你好' ko")" "ko: 3 frames per character"
+  assert_eq "6.848" "$(lib_eval 'qwen3_runaway_seconds 107')" "80% of the cap's audio length"
+}
+
 # case_configured_voice_per_language — QWEN_VOICE_<lang> selects the preset per language.
 # Args:    none
 # Returns: 0 always

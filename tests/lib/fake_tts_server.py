@@ -7,6 +7,7 @@ Behaviour switches come from environment variables and a control file that tests
 while the server runs.
 """
 import io  # In-memory buffer for building the WAV reply.
+import math  # Sine tone so the fake audio is not silence.
 import json  # Request parsing and log lines.
 import os  # Environment switches and the process id.
 import signal  # Clean shutdown on SIGTERM like the real server.
@@ -17,7 +18,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # Minimal H
 
 # JSON-lines file every event is appended to (set by the test).
 LOG_PATH = os.environ.get("FAKE_TTS_LOG", "")
-# File whose content switches behaviour per request: ok | fail500 | slow=<s> | dur=<audio s>.
+# File whose content switches behaviour per request, several words allowed:
+# ok | fail500 | slow=<s> | dur=<audio s> | amp=<0..1> | silent_first=<n> | long_first=<n>.
 CONTROL_PATH = os.environ.get("FAKE_TTS_CONTROL", "")
 # Device that makes the server exit at once ("any" = every device), for fallback tests.
 BAD_DEVICE = os.environ.get("FAKE_TTS_BAD_DEVICE", "")
@@ -56,26 +58,49 @@ def read_mode():
         return handle.read().strip() or "ok"
 
 
-def make_wav(seconds=0.25):
-    """Build a valid mono 24 kHz WAV of silence.
+def make_wav(seconds=0.25, amplitude=0.3):
+    """Build a valid mono 24 kHz WAV holding a 220 Hz tone.
 
     Args:
         seconds: Length of the audio.
+        amplitude: Peak amplitude 0..1 (0 gives silence).
 
     Returns:
         The WAV file as bytes.
     """
     # BytesIO avoids touching the disk for every reply.
     buffer = io.BytesIO()
-    # Quarter second of 16-bit samples keeps the tests quick but real for mpv.
+    frame_count = int(24000 * seconds)
+    # 16-bit samples of a sine; amplitude 0 degenerates to pure silence.
+    samples = b"".join(
+        int(amplitude * 32767 * math.sin(2 * math.pi * 220 * i / 24000)).to_bytes(
+            2, "little", signed=True) for i in range(frame_count))
     with wave.open(buffer, "wb") as writer:
         writer.setnchannels(1)
         writer.setsampwidth(2)
         # 24 kHz mono matches what the real server returns.
         writer.setframerate(24000)
-        writer.writeframes(b"\x00\x00" * int(24000 * seconds))
+        writer.writeframes(samples)
     # getvalue is complete once the wave writer closed.
     return buffer.getvalue()
+
+
+def mode_value(mode, key, default):
+    """Read one numeric option out of the control file words.
+
+    Args:
+        mode: The control file content (space separated words).
+        key: Option name without the equals sign.
+        default: Value when the option is absent.
+
+    Returns:
+        The option as a float, or the default.
+    """
+    # Words look like "dur=4"; anything without the key prefix is skipped.
+    for word in mode.split():
+        if word.startswith(key + "="):
+            return float(word.split("=", 1)[1])
+    return default
 
 
 def parse_args(argv):
@@ -106,6 +131,8 @@ class Handler(BaseHTTPRequestHandler):
 
     # Model path of this server process, set before serving starts.
     model_path = ""
+    # Number of speech requests answered so far by this process.
+    request_count = 0
 
     def log_message(self, format, *args):  # pylint: disable=redefined-builtin
         """Silence the default access log.
@@ -196,15 +223,21 @@ class Handler(BaseHTTPRequestHandler):
             "input", "voice", "language", "response_format", "max_new_tokens", "seed")}})
         mode = read_mode()
         # Simulated server error: the player must fall back to Piper.
-        if mode == "fail500":
+        if "fail500" in mode.split():
             self.send_bytes(500, "application/json", b'{"error":{"message":"boom"}}')
             return
         # Simulated slow synthesis, for idle-timer and concurrency tests.
-        if mode.startswith("slow="):
-            time.sleep(float(mode.split("=", 1)[1]))
-        # dur=<seconds> makes the reply long enough to test playback controls.
-        seconds = float(mode.split("=", 1)[1]) if mode.startswith("dur=") else 0.25
-        self.send_bytes(200, "audio/wav", make_wav(seconds))
+        time.sleep(mode_value(mode, "slow", 0.0))
+        # silent_first=<n> makes the first n requests answer with silence (GPU contention).
+        Handler.request_count += 1
+        amplitude = 0.0 if Handler.request_count <= mode_value(mode, "silent_first", 0) \
+            else mode_value(mode, "amp", 0.3)
+        # dur=<seconds> makes the reply long enough to test playback controls and runaways.
+        seconds = mode_value(mode, "dur", 0.25)
+        # long_first=<n> makes the first n replies a runaway of 40 s, whatever the text was.
+        if Handler.request_count <= mode_value(mode, "long_first", 0):
+            seconds = 40.0
+        self.send_bytes(200, "audio/wav", make_wav(seconds, amplitude))
 
     def handle_voice(self, body):
         """Log a voice registration; only Base models accept it, like the real server.

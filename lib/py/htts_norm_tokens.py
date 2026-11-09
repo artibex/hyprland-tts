@@ -4,7 +4,7 @@ These stages need the language rules only for word lists (abbreviation tables, t
 for "slash" and "dash"). Numeric stages live in ``htts_norm_numbers``.
 """
 
-# Annotations stay lazy so no typing import is needed at runtime.
+# Postponed annotations let list[str] and X | None work on Python 3.9 too.
 from __future__ import annotations
 
 import re

@@ -25,18 +25,39 @@ _player_paths() {
   COUNTFILE="$RUN_DIR/render.count"
 }
 
+# daemon_pid_valid — tell whether a pid is a live hyprland-tts player daemon.
+# Args:    $1 <pid>
+# Returns: 0 when the process exists and its command line names __daemon; 1 otherwise
+# Globals: none
+daemon_pid_valid() {
+  # Digits only: the pid comes from a file and must never reach /proc paths unchecked.
+  [[ "${1:-}" =~ ^[0-9]+$ ]] || return 1
+  # The command line defeats pid reuse: a stale pid file must never get an unrelated process killed.
+  [ -r "/proc/$1/cmdline" ] && tr '\0' ' ' < "/proc/$1/cmdline" | grep -q -- '__daemon'
+}
+
 # daemon_alive — tell whether the player daemon is running.
 # Args:    none
-# Returns: 0 when the pid file names a live process; 1 otherwise
-# Globals: reads PIDFILE via _player_paths
+# Returns: 0 when the pid file names a live player daemon; 1 otherwise
+# Globals: writes the player paths via _player_paths; reads PIDFILE
 daemon_alive() {
-  local pid
   _player_paths
   # No pid file means no daemon was ever started in this run directory.
   [ -f "$PIDFILE" ] || return 1
-  pid="$(cat "$PIDFILE" 2>/dev/null || true)"
-  # An empty or stale pid means the daemon is gone.
-  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+  daemon_pid_valid "$(cat "$PIDFILE" 2>/dev/null || true)"
+}
+
+# daemon_signal — send a signal to the daemon and everything it started.
+# Args:    $1 <signal name, e.g. TERM>; $2 <daemon pid>
+# Returns: 0 always
+# Globals: none
+# Notes:   The daemon leads its own session, so its group also holds mpv and in-flight curl/piper.
+daemon_signal() {
+  local group
+  group="$(ps -o pgid= -p "$2" 2>/dev/null | tr -d ' ')"
+  # Group-kill only when the pid really leads its group; otherwise signal the process alone.
+  if [ "$group" = "$2" ]; then kill "-$1" -- "-$2" 2>/dev/null || true
+  else kill "-$1" "$2" 2>/dev/null || true; fi
 }
 
 # kill_existing_daemon — terminate a running daemon so a new speak starts clean.
@@ -49,14 +70,14 @@ kill_existing_daemon() {
   # Nothing to kill when no daemon runs.
   daemon_alive || return 0
   pid="$(cat "$PIDFILE" 2>/dev/null || true)"
-  kill -TERM "$pid" 2>/dev/null || true
+  daemon_signal TERM "$pid"
   # Up to one second for the daemon's trap to quit mpv, then force.
-  while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 20 ]; do
+  while daemon_pid_valid "$pid" && [ "$waited" -lt 20 ]; do
     sleep 0.05
     waited=$((waited + 1))
   done
-  # Force the exit if the daemon ignored SIGTERM.
-  kill -KILL "$pid" 2>/dev/null || true
+  # Force the exit if the daemon ignored SIGTERM (the pid is checked again against reuse).
+  if daemon_pid_valid "$pid"; then daemon_signal KILL "$pid"; fi
 }
 
 # mpv_ipc — send one JSON command to mpv's IPC socket.
@@ -129,6 +150,12 @@ speak_check_tools() {
   if [ "$1" = "piper" ]; then
     have "$PIPER_BIN" || speak_fail "$PIPER_BIN not found (install piper-tts-bin)"
   fi
+  # The Qwen3 engine talks to its server with curl and starts it under a flock.
+  if [ "$1" = "qwen3" ]; then
+    have curl || speak_fail "curl not found (install curl)"
+    have flock || speak_fail "flock not found (install util-linux)"
+  fi
+  # Without mpv there is no player at all.
   have "$MPV_BIN" || speak_fail "$MPV_BIN not found (install mpv)"
   # Playback controls are impossible without socat, so fail early and visibly.
   have socat || speak_fail "socat not found (install socat)"
@@ -145,13 +172,72 @@ speak_default_lang() {
   printf '%s' "$first"
 }
 
+# speak_limit_text — cut an extremely long selection and tell the user.
+# Args:    $1 <text>
+# Returns: 0 always; stdout: the text, shortened to SELECTION_MAX_CHARS when longer
+# Globals: reads SELECTION_MAX_CHARS
+speak_limit_text() {
+  local limit="$SELECTION_MAX_CHARS"
+  # A junk setting falls back to the default instead of cutting everything.
+  [[ "$limit" =~ ^[1-9][0-9]*$ ]] || limit=200000
+  if [ "${#1}" -gt "$limit" ]; then
+    notify "hyprland-tts: selection shortened" "Only the first $limit characters are read."
+    # Cutting by characters keeps multi-byte letters intact.
+    printf '%s' "${1:0:limit}"
+  else
+    printf '%s' "$1"
+  fi
+}
+
+# speak_wait_for_daemon — wait until a freshly started daemon has written its pid file.
+# Args:    none
+# Returns: 0 when the pid file exists; 1 after about three seconds without one
+# Globals: reads PIDFILE
+speak_wait_for_daemon() {
+  local waited=0
+  # Until the pid file exists, a following speak could not find (and stop) this daemon.
+  while [ ! -s "$PIDFILE" ] && [ "$waited" -lt 60 ]; do
+    sleep 0.05
+    waited=$((waited + 1))
+  done
+  # The file's existence is the success condition.
+  [ -s "$PIDFILE" ]
+}
+
+# speak_start_document — under the speak lock: stop the old daemon, prepare chunks, start a new one.
+# Args:    $1 <text>; $2 <allowed languages, comma separated>
+# Returns: 0 on success or empty text; exits 1 via speak_fail when the run directory is unsafe
+# Globals: reads RUN_DIR, HTTS_SELF, DEFAULT_LANG; writes the run directory contents
+speak_start_document() {
+  # An unsafe (foreign or symlinked) runtime directory would leak chunks and the mpv socket.
+  ensure_private_dir "$RUN_DIR" || speak_fail "unsafe runtime directory: $RUN_DIR"
+  # One speak at a time: two quick keypresses must not start two daemons.
+  (
+    flock -w 30 7 || exit 1
+    kill_existing_daemon
+    # Clear the previous document but keep the lock file this subshell holds.
+    find "$RUN_DIR" -mindepth 1 -maxdepth 1 ! -name .speak.lock -exec rm -rf -- {} +
+    speak_notice_engine_choice
+    # The router yields "<lang><TAB><sentence>" lines; voices are picked per chunk later.
+    printf '%s' "$1" | prepare_chunks "$2" "$(speak_default_lang)" > "$CHUNKFILE"
+    [ -s "$CHUNKFILE" ] || exit 0
+    # setsid detaches the daemon from the keybind's process group; the subshell is the fallback.
+    setsid -f "${HTTS_SELF:-$0}" __daemon >/dev/null 2>&1 < /dev/null 7>&- ||
+      ( "${HTTS_SELF:-$0}" __daemon >/dev/null 2>&1 < /dev/null 7>&- & )
+    speak_wait_for_daemon || true
+  # The lock descriptor lives only as long as this subshell.
+  ) 7> "$RUN_DIR/.speak.lock"
+}
+
 # speak_text — shared by cmd_speak and cmd_hover: chunk the text and start the daemon.
 # Args:    $1 <text to speak>
 # Returns: 0 on success or empty text; exits 1 via speak_fail without a usable engine
-# Globals: reads ENGINE, DEFAULT_LANG, HTTS_SELF; writes RUN_DIR contents
+# Globals: reads ENGINE, DEFAULT_LANG, HTTS_SELF, SELECTION_MAX_CHARS; writes RUN_DIR contents
 speak_text() {
-  local text="$1" active_engine allowed
+  local text active_engine allowed
   _player_paths
+  # An enormous selection is shortened before any processing.
+  text="$(speak_limit_text "$1")"
   # The engine decides which tools and which language list apply.
   active_engine="$(engine_active)"
   speak_check_tools "$active_engine"
@@ -162,17 +248,7 @@ speak_text() {
   declare -F prepare_chunks >/dev/null || speak_fail "router too old: prepare_chunks missing"
   # Start loading the Qwen3 model now so it overlaps with text preparation.
   engine_warm
-  kill_existing_daemon
-  rm -rf "$RUN_DIR"
-  # Fresh, empty runtime directory for this document.
-  mkdir -p "$RUN_DIR"
-  speak_notice_engine_choice
-  # The router yields "<lang><TAB><sentence>" lines; voices are picked per chunk later.
-  printf '%s' "$text" | prepare_chunks "$allowed" "$(speak_default_lang)" > "$CHUNKFILE"
-  [ -s "$CHUNKFILE" ] || exit 0
-  # setsid detaches the daemon from the keybind's process group; the subshell is the fallback.
-  setsid -f "${HTTS_SELF:-$0}" __daemon >/dev/null 2>&1 < /dev/null ||
-    ( "${HTTS_SELF:-$0}" __daemon >/dev/null 2>&1 < /dev/null & )
+  speak_start_document "$text" "$allowed"
 }
 
 # speak_notice_engine_choice — tell the user once when a requested engine is not usable.
@@ -180,24 +256,44 @@ speak_text() {
 # Returns: 0 always
 # Globals: reads ENGINE
 speak_notice_engine_choice() {
-  # ENGINE=qwen3 with no install would otherwise silently sound like Piper.
-  [ "$ENGINE" = "qwen3" ] && [ "$(engine_active)" = "piper" ] &&
+  local reason
+  # Only a requested-but-unusable Qwen3 deserves a notice; auto quietly uses Piper.
+  [ "$ENGINE" = "qwen3" ] && [ "$(engine_active)" = "piper" ] || return 0
+  reason="$(engine_unusable_reason)"
+  if [ "$reason" = "not installed" ]; then
+    # Nothing to find: the engine is simply absent.
     engine_notify_once missing "hyprland-tts: Qwen3 not installed" \
       "Using Piper. Install with: hyprland-tts engine install qwen3"
-  return 0
+  else
+    engine_notify_once missing "hyprland-tts: Qwen3 unavailable" "Using Piper: $reason"
+  fi
 }
 
-# daemon_cleanup — stop the renderer and mpv, remove the pid file.
+# daemon_cleanup — stop the renderer and mpv, delete the audio files, remove the pid file.
 # Args:    none
 # Returns: 0 always
-# Globals: reads DAEMON_MPV_PID, DAEMON_RENDER_PID, PIDFILE
+# Globals: reads DAEMON_MPV_PID, DAEMON_RENDER_PID, PIDFILE, HTTS_KEEP_AUDIO; deletes WAVs
 daemon_cleanup() {
-  # Stop the renderer first so it cannot append to a dying mpv.
-  if [ -n "$DAEMON_RENDER_PID" ]; then kill "$DAEMON_RENDER_PID" 2>/dev/null || true; fi
+  # Stop the renderer and its in-flight curl/piper first, so nothing appends to a dying mpv.
+  if [ -n "$DAEMON_RENDER_PID" ]; then
+    pkill -P "$DAEMON_RENDER_PID" 2>/dev/null || true
+    kill "$DAEMON_RENDER_PID" 2>/dev/null || true
+  fi
   # Ask mpv to quit politely, then make sure the process is gone.
   mpv_ipc '{"command":["quit"]}' >/dev/null 2>&1 || true
   if [ -n "$DAEMON_MPV_PID" ]; then kill "$DAEMON_MPV_PID" 2>/dev/null || true; fi
+  # The spoken text and its audio are private; they must not outlive the playback.
+  [ "${HTTS_KEEP_AUDIO:-0}" = "1" ] || rm -f "$RUN_DIR"/s[0-9]*.wav "$CHUNKFILE"
   rm -f "$PIDFILE"
+}
+
+# daemon_report_failure — log a daemon problem and tell the user (keybind runs have no terminal).
+# Args:    $1 <message>
+# Returns: 0 always
+# Globals: reads RUN_DIR
+daemon_report_failure() {
+  printf '%s %s\n' "$(date +%H:%M:%S)" "$1" >> "$RUN_DIR/daemon.log" 2>/dev/null || true
+  notify "hyprland-tts: playback problem" "$1"
 }
 
 # daemon_start_mpv — launch the idle mpv with its IPC socket and wait for the socket.
@@ -206,6 +302,11 @@ daemon_cleanup() {
 # Globals: reads MPV_BIN, MPV_SOCK, DEFAULT_SPEED; writes DAEMON_MPV_PID
 daemon_start_mpv() {
   local waited=0
+  # Unix socket paths are limited to about 107 bytes; a longer one makes mpv ignore the option.
+  if [ "${#MPV_SOCK}" -gt 100 ]; then
+    daemon_report_failure "runtime path too long: $MPV_SOCK"
+    return 1
+  fi
   # Idle mode keeps one process alive across chunks; pitch correction keeps voices natural.
   "$MPV_BIN" --idle=yes --no-video --force-window=no --no-terminal \
     --input-ipc-server="$MPV_SOCK" \
@@ -230,9 +331,23 @@ daemon_playback_finished() {
   # The rendered total is written by render_worker when it finishes.
   total="$(cat "$COUNTFILE" 2>/dev/null || true)"
   played="$(mpv_get playlist-count)"
-  # mpv's own count only rises once it processed an append, so a stale idle read
-  # right after the last append cannot cut the final chunks off.
+  # mpv's count rises when it processed an append, so a poll before the last append is rejected;
+  # the caller additionally needs two polls in a row, because idle lags the count by milliseconds.
   [ -n "$total" ] && [ "$played" = "$total" ] && [ "$(mpv_get idle-active)" = "true" ]
+}
+
+# daemon_render_crashed — handle a renderer that died without finishing (no done marker).
+# Args:    none
+# Returns: 0 when the renderer vanished and the marker was written; 1 otherwise
+# Globals: reads DAEMON_RENDER_PID, DONEFILE, COUNTFILE
+daemon_render_crashed() {
+  # Dead pid first, marker second: a normal finish touches the marker before the pid exits.
+  ! kill -0 "$DAEMON_RENDER_PID" 2>/dev/null || return 1
+  [ ! -f "$DONEFILE" ] || return 1
+  # Declare what mpv has as the total, so the normal finish logic ends the playback.
+  mpv_get playlist-count > "$COUNTFILE"
+  : > "$DONEFILE"
+  daemon_report_failure "the renderer stopped unexpectedly; playing what was rendered"
 }
 
 # daemon_monitor — wait until playback is finished, then quit mpv.
@@ -240,12 +355,22 @@ daemon_playback_finished() {
 # Returns: 0 when mpv exited or was told to quit
 # Globals: reads DAEMON_MPV_PID
 daemon_monitor() {
+  local idle_polls=0
   while kill -0 "$DAEMON_MPV_PID" 2>/dev/null; do
+    # A vanished renderer is turned into a normal finish.
+    daemon_render_crashed || true
     if daemon_playback_finished; then
-      # Playback is complete: let mpv exit so the daemon can end.
+      idle_polls=$((idle_polls + 1))
+    else
+      # A busy reading restarts the count.
+      idle_polls=0
+    fi
+    # Two idle polls in a row: one alone can be the stale reading right after an append.
+    if [ "$idle_polls" -ge 2 ]; then
       mpv_ipc '{"command":["quit"]}' >/dev/null
       break
     fi
+    # Polling interval; the controls themselves are instant (mpv IPC).
     sleep 0.3
   done
 }
@@ -261,8 +386,8 @@ run_daemon() {
   trap 'daemon_cleanup; exit 0' TERM INT EXIT
   echo $$ > "$PIDFILE"
   [ -s "$CHUNKFILE" ] || exit 0
-  # Without a running mpv there is nothing to feed, so end quietly.
-  daemon_start_mpv || exit 0
+  # Without a running mpv there is nothing to feed; the user is told why.
+  daemon_start_mpv || { daemon_report_failure "mpv did not start"; exit 0; }
   # Rendering and playback run concurrently: mpv plays chunk 0 while chunk 1 renders.
   render_worker &
   DAEMON_RENDER_PID=$!
@@ -283,7 +408,8 @@ render_worker() {
     wav="$RUN_DIR/s$(printf '%05d' "$index").wav"
     # append-play (not append) resumes playback if mpv already drained and went idle.
     if engine_render "$lang" "$text" "$wav"; then
-      mpv_ipc "{\"command\":[\"loadfile\",\"$wav\",\"append-play\"]}" >/dev/null
+      # A dead mpv must not kill the renderer under set -e; the monitor ends with mpv anyway.
+      mpv_ipc "{\"command\":[\"loadfile\",\"$wav\",\"append-play\"]}" >/dev/null || true
       index=$((index + 1))
     fi
   done < "$CHUNKFILE"

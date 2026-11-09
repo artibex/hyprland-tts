@@ -5,7 +5,7 @@ sentence. The language (and with it the number format: German ``1.250,75`` versu
 ``1,250.75``) is decided before these stages run, once per sentence.
 """
 
-# Annotations stay lazy so no typing import is needed at runtime.
+# Postponed annotations let list[str] and X | None work on Python 3.9 too.
 from __future__ import annotations
 
 import re
@@ -18,6 +18,10 @@ LEFT_GUARD = r"(?<![\w.,])"
 RIGHT_GUARD = r"(?![\w]|[.,]?\d)"
 # Plain digit strings of this length or more are identifiers (phone numbers), not quantities.
 LONG_DIGIT_STRING = 7
+# The word for "+" in front of an international phone number.
+PLUS_WORDS = {"de": "plus", "en": "plus", "fr": "plus", "es": "más", "it": "più"}
+# Integer strings longer than this are data (hashes, dumps), not quantities; they stay as written.
+MAX_QUANTITY_DIGITS = 30
 # Leading articles of a spoken time that duplicate a preposition already in the text.
 TIME_ARTICLES = {"las": "las ", "la": "la ", "alle": "le ", "dalle": "le ", "delle": "le "}
 # Currency name or symbol (as written in the text) to ISO code.
@@ -147,6 +151,20 @@ def reads_as_digits(number: ParsedNumber) -> bool:
     return leading_zero or len(number.digits) >= LONG_DIGIT_STRING
 
 
+def keeps_digits(number: ParsedNumber) -> bool:
+    """Tell whether a number is too long to be a quantity (left as written).
+
+    Args:
+        number: The parsed number.
+
+    Returns:
+        True above ``MAX_QUANTITY_DIGITS`` integer digits; such strings are data, not amounts,
+        and Python refuses to convert integers beyond 4300 digits at all.
+    """
+    # The integer and fraction parts are both bounded: a huge fraction is spelled digit by digit.
+    return len(number.digits) > MAX_QUANTITY_DIGITS
+
+
 def speak_number(number: ParsedNumber, rules, attributive: bool = False) -> str:
     """Spell a parsed number in the language of ``rules``.
 
@@ -158,6 +176,10 @@ def speak_number(number: ParsedNumber, rules, attributive: bool = False) -> str:
     Returns:
         The number as words.
     """
+    # Absurdly long digit strings stay as they are instead of crashing the whole text.
+    if keeps_digits(number):
+        fraction = f",{number.fraction}" if number.fraction else ""
+        return f"{'-' if number.negative else ''}{number.digits}{fraction}"
     # Decimals read the fraction digit by digit; identifiers read every digit.
     if number.fraction:
         words = htts_numbers.decimal(
@@ -186,6 +208,21 @@ def previous_word(text: str, position: int) -> str:
     # Only a short window in front of the match matters.
     window = text[max(0, position - 40):position]
     found = re.search(r"(\w+)[\s,]*$", window)
+    return found.group(1).lower() if found else ""
+
+
+def previous_abbreviation(text: str, position: int) -> str:
+    """Return the lowercase word in front of a position, allowing one trailing period ("S. ").
+
+    Args:
+        text: The sentence.
+        position: Index where the match starts.
+
+    Returns:
+        The previous word without its period (empty at the start).
+    """
+    # Same short window as previous_word; the optional period lets "S." count as "s".
+    found = re.search(r"(\w+)\.?\s*$", text[max(0, position - 40):position])
     return found.group(1).lower() if found else ""
 
 
@@ -251,6 +288,9 @@ def expand_currency_amount(match: re.Match[str], rules) -> str:
     # The currency table supplies the major and minor word forms.
     number = parse_number(match)
     major_one, major_many, minor_one, minor_many = rules.CURRENCIES[code]
+    # Amounts beyond any real price stay untouched, like every over-long digit string.
+    if keeps_digits(number):
+        return match.group(0)
     # More than two fraction digits is not money-like; read it as a decimal.
     if len(number.fraction) > 2:
         return f"{speak_number(number, rules)} {major_many}"
@@ -417,10 +457,49 @@ def expand_dotted_ordinals(text: str, rules) -> str:
         Returns:
             The inflected ordinal words.
         """
+        previous = previous_word(match.string, match.start())
+        # "S. 5." and "Seite 5." name a page: a cardinal, with the period kept as sentence end.
+        reference_words = getattr(rules, "REFERENCE_WORDS", ())
+        if previous_abbreviation(match.string, match.start()) in reference_words:
+            return htts_numbers.cardinal(int(match.group("num")), rules.CODE) + "."
         # The preceding word decides between "dritte" and "dritten".
         base = htts_numbers.ordinal(int(match.group("num")), rules.CODE)
-        return rules.inflect_ordinal(base, previous_word(match.string, match.start()), False)
+        return rules.inflect_ordinal(base, previous, False)
 
+    return pattern.sub(speak, text)
+
+
+def expand_international_phone(text: str, rules) -> str:
+    """Speak international phone numbers digit by digit ("+49 30 1234" -> "plus vier neun ...").
+
+    Args:
+        text: Sentence text.
+        rules: Language rule module.
+
+    Returns:
+        The text with ``+<country> ...`` numbers of at least seven digits spoken.
+    """
+    pattern = cached_pattern(
+        rules, "phone", lambda r: r"(?<![\w+])\+\d[\d ()/\-]{5,}\d(?!\d)"
+    )
+
+    def speak(match: re.Match[str]) -> str:
+        """Render one phone number, or keep short matches such as "+5 - 3" untouched.
+
+        Args:
+            match: Match of the phone pattern.
+
+        Returns:
+            The spoken number or the original text.
+        """
+        digits = re.sub(r"\D", "", match.group(0))
+        # Fewer than seven digits is arithmetic or a short code, not a phone number.
+        if len(digits) < 7:
+            return match.group(0)
+        plus = PLUS_WORDS.get(rules.CODE, "plus")
+        return f"{plus} {htts_numbers.spell_digits(digits, rules.CODE)}"
+
+    # Every phone-like match goes through the same speaker above.
     return pattern.sub(speak, text)
 
 
@@ -736,6 +815,7 @@ def expand_numeric(text: str, rules) -> str:
         return text
     # Compound patterns (dates, times, money) must run before plain numbers.
     for stage in (
+        expand_international_phone,
         expand_textual_dates, expand_numeric_dates, expand_times, expand_currency,
         expand_percent, expand_units, expand_suffix_ordinals, expand_dotted_ordinals,
         expand_years, expand_plain_numbers, expand_versions,

@@ -51,15 +51,48 @@ py_helpers_dir() {
   printf '%s/py' "$here"
 }
 
-# system_python_has_deps — check for AUR-installed fasttext + num2words without starting Python.
+# pyenv_check_key — build a cache key that changes when an interpreter or its packages change.
+# Args:    $1.. <paths whose modification times matter (interpreter, site-packages, markers)>
+# Returns: 0 always; stdout: a checksum number
+# Globals: none
+pyenv_check_key() {
+  # Names and modification times of the interpreter and its package directories identify a state.
+  stat -L -c '%n %.9Y %s %i' "$@" 2>/dev/null | cksum | cut -d' ' -f1
+}
+
+# pyenv_import_ok — run the real import check for an interpreter, cached until something changes.
+# Args:    $1 <python interpreter>; $2.. <paths that invalidate the cached answer>
+# Returns: 0 when fasttext and num2words import; 1 otherwise
+# Globals: reads HTTS_CACHE_DIR
+# Notes:   The check costs ~100 ms, so the answer (also a failure) is cached per interpreter state.
+pyenv_import_ok() {
+  local python="$1" cache_file
+  shift
+  # One cache file per interpreter state.
+  cache_file="$HTTS_CACHE_DIR/import-check-$(pyenv_check_key "$python" "$@")"
+  # A cached verdict is valid for exactly this interpreter and package state.
+  if [ -f "$cache_file" ]; then [ "$(cat "$cache_file")" = "ok" ]; return; fi
+  mkdir -p "$HTTS_CACHE_DIR"
+  if "$python" -c 'import fasttext, num2words' >/dev/null 2>&1; then
+    # Remember the success until the interpreter or its packages change.
+    printf 'ok' > "$cache_file"
+    return 0
+  fi
+  printf 'fail' > "$cache_file"
+  # The interpreter cannot import the helper packages.
+  return 1
+}
+
+# system_python_has_deps — check for AUR-installed fasttext + num2words with a real import.
 # Args:    none
-# Returns: 0 when both module directories exist for /usr/bin/python3; 1 otherwise
+# Returns: 0 when /usr/bin/python3 can import both packages; 1 otherwise
 # Globals: none
 system_python_has_deps() {
+  local -a site_dirs
   [ -x /usr/bin/python3 ] || return 1
-  # Glob the site-packages of whatever minor version is installed.
-  compgen -G '/usr/lib/python3*/site-packages/fasttext' > /dev/null || return 1
-  compgen -G '/usr/lib/python3*/site-packages/num2words' > /dev/null
+  # Site-package directories of every installed minor version invalidate the cached verdict.
+  mapfile -t site_dirs < <(compgen -G '/usr/lib/python3*/site-packages' || true)
+  pyenv_import_ok /usr/bin/python3 "${site_dirs[@]}"
 }
 
 # pyenv_python — print the interpreter that can run the text helpers.
@@ -73,10 +106,12 @@ pyenv_python() {
     [ -x "$HTTS_PYTHON" ] && { printf '%s' "$HTTS_PYTHON"; return 0; }
     return 1
   fi
-  # The private venv counts once `deps install` has finished (marker file).
+  # The private venv counts once `deps install` has finished (marker file) and still imports:
+  # a system Python upgrade can silently break an old venv.
   venv="$(pyenv_venv_dir)"
-  if [ -x "$venv/bin/python3" ] && [ -f "$venv/.deps-ok" ]; then
-    # The marker proves the install finished, so the venv is trusted.
+  if [ -x "$venv/bin/python3" ] && [ -f "$venv/.deps-ok" ] &&
+    pyenv_import_ok "$venv/bin/python3" "$venv/.deps-ok" "$venv/pyvenv.cfg"; then
+    # The venv is used.
     printf '%s/bin/python3' "$venv"
     return 0
   fi
@@ -127,8 +162,8 @@ deps_download_model() {
   # Create the target directory and announce the small download.
   mkdir -p "$dir"
   log "downloading $LID_MODEL_NAME (938 KB)"
-  curl --proto '=https' --tlsv1.2 -fsSL --retry 2 -o "$part" "$LID_MODEL_URL" \
-    || { rm -f "$part"; log "model download failed"; return 1; }
+  curl --proto '=https' --tlsv1.2 -fsSL --retry 2 --connect-timeout 20 --max-time 120 \
+    -o "$part" "$LID_MODEL_URL" || { rm -f "$part"; log "model download failed"; return 1; }
   # A wrong checksum means a corrupted or tampered file: delete it.
   if [ "$(deps_sha256_of "$part" || true)" != "$LID_MODEL_SHA256" ]; then
     rm -f "$part"
@@ -211,12 +246,30 @@ deps_install() {
   log "deps ready: $(pyenv_python)"
 }
 
-# deps_status — report what is installed.
+# deps_status_porcelain — print the helper state as key=value lines for the GUI.
 # Args:    none
-# Returns: 0 when python helpers and the model are both usable; 1 otherwise
+# Returns: 0 always; stdout: python=, model=, system_packages=, ready=
+# Globals: none
+deps_status_porcelain() {
+  local python="" model="" system_packages=0 ready=0
+  # Empty values mean "missing"; the lookups already print nothing on failure.
+  python="$(pyenv_python || true)"
+  model="$(langid_model_path || true)"
+  system_python_has_deps && system_packages=1
+  # Ready needs both the interpreter with its packages and the model file.
+  [ -z "$python" ] || [ -z "$model" ] || ready=1
+  printf 'python=%s\nmodel=%s\nsystem_packages=%s\nready=%s\n' \
+    "$python" "$model" "$system_packages" "$ready"
+}
+
+# deps_status — report what is installed.
+# Args:    $1 <optional --porcelain>
+# Returns: 0 when python helpers and the model are both usable (always 0 for --porcelain)
 # Globals: none
 deps_status() {
   local python="" model="" missing=0
+  # The machine-readable form never fails, so a GUI can read it unconditionally.
+  [ "${1:-}" != "--porcelain" ] || { deps_status_porcelain; return 0; }
   # Report each component on its own line.
   if python="$(pyenv_python)"; then log "python: $python"; else
     log "python: missing"; missing=1
@@ -249,9 +302,12 @@ deps_remove() {
 # Returns: 0 on success; 1 on failure; 2 on a usage error
 # Globals: none
 cmd_deps() {
-  case "${1:-status}" in
+  local sub="${1:-status}"
+  shift || true
+  # Each subcommand maps to one function.
+  case "$sub" in
     install) deps_install ;;  # create venv + model, idempotent
-    status)  deps_status ;;   # show what is usable right now
+    status)  deps_status "$@" ;;   # show what is usable right now
     remove)  deps_remove ;;   # delete venv + model
     *) log "usage: hyprland-tts deps [install|status|remove]"; return 2 ;;
   esac

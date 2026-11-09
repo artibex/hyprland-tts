@@ -156,19 +156,63 @@ case_voice_remove_user_only() {
   assert_rc 1 "$?" "unsafe name refused"
 }
 
-# case_base_variant_defaults — Base picks <lang>-* voices, then 'default', then any clone.
+# case_base_variant_defaults — Base picks <lang>-* clones, then 'default', then its built-in voice.
 # Args:    none
 # Returns: 0 always
 # Globals: none
 case_base_variant_defaults() {
-  test_install_fake_engine "customvoice base"
-  test_set_config "QWEN_VARIANT=base"
+  test_install_fake_engine "base"
   make_shipped_voice de-anna
   mkdir -p "$TEST_ROOT/shipped/en-bob" "$TEST_ROOT/shipped/default"
   for v in en-bob default; do printf 's' > "$TEST_ROOT/shipped/$v/ref.spk"; printf 'r' > "$TEST_ROOT/shipped/$v/ref.rvq"; done
   assert_eq "de-anna" "$(lib_eval 'voice_for_lang de')" "de -> de-anna"
   assert_eq "en-bob" "$(lib_eval 'voice_for_lang en')" "en -> en-bob"
   assert_eq "default" "$(lib_eval 'voice_for_lang fr')" "fr -> default"
+  rm -rf "$TEST_ROOT/shipped/default"
+  assert_eq "base-default" "$(lib_eval 'voice_for_lang fr')" "fr without clone -> built-in voice"
+  assert_eq "base-default" "$(lib_eval 'voice_for_lang ja')" "ja -> built-in voice"
+}
+
+# case_shipped_native_voices_are_the_defaults — the packaged clones cover de en fr es it.
+# Args:    none
+# Returns: 0 always
+# Globals: none
+case_shipped_native_voices_are_the_defaults() {
+  test_install_fake_engine "base"
+  export HYPRLAND_TTS_SYSTEM_VOICES="$TEST_REPO_DIR/share/voices"
+  assert_eq "de-thorsten en-lj es-mls-8585 fr-siwis it-mls-8582" \
+    "$(lib_eval 'for l in de en es fr it; do voice_for_lang $l; printf " "; done' | xargs -n1 | sort | xargs)" \
+    "five native defaults"
+  assert_eq "base-default" "$(lib_eval 'voice_for_lang pt')" "pt uses the built-in voice"
+  assert_contains "$(htts voice list --porcelain)" "assign	de	de-thorsten" "porcelain assignment"
+  assert_contains "$(htts voice list --porcelain)" "assign	ko	base-default" "porcelain built-in"
+}
+
+# case_voice_info_reports_attribution — info finds ATTRIBUTION.md as well as LICENSE.
+# Args:    none
+# Returns: 0 always
+# Globals: none
+case_voice_info_reports_attribution() {
+  test_install_fake_engine "base"
+  export HYPRLAND_TTS_SYSTEM_VOICES="$TEST_REPO_DIR/share/voices"
+  local out; out="$(htts voice info de-thorsten)"
+  assert_contains "$out" "source=shipped" "shipped source"
+  assert_contains "$out" "license=$TEST_REPO_DIR/share/voices/de-thorsten/ATTRIBUTION.md" "attribution file"
+  htts voice info nobody >/dev/null 2>&1
+  assert_rc 1 "$?" "unknown voice refused"
+}
+
+# case_builtin_voice_is_assignable_and_reserved — base-default can be set, never created.
+# Args:    none
+# Returns: 0 always
+# Globals: none
+case_builtin_voice_is_assignable_and_reserved() {
+  test_install_fake_engine "base"
+  make_reference
+  htts voice set pt base-default >/dev/null 2>&1
+  assert_rc 0 "$?" "set pt base-default"
+  htts voice add base-default "$TEST_ROOT/ref.wav" "$TEST_ROOT/ref.txt" >/dev/null 2>&1
+  assert_rc 1 "$?" "reserved name refused"
 }
 
 # case_base_worker_registers_clones — the worker uploads every cloned voice at start.

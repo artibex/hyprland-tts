@@ -6,7 +6,7 @@ the language must be known before numbers are spoken (it decides the number form
 chunking comes last because normalisation changes the text length.
 """
 
-# Annotations stay lazy so no typing import is needed at runtime.
+# Postponed annotations let list[str] and X | None work on Python 3.9 too.
 from __future__ import annotations
 
 import htts_langid

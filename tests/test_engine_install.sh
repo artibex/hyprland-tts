@@ -50,6 +50,8 @@ FAKE
 echo "cmake $*" >> "$FAKE_BUILD_LOG"
 if [ "$1" = "--build" ]; then
   build="$2"
+  printf '[ 50%%] Building CXX object fake.o\n'
+  sleep "${FAKE_BUILD_SLEEP:-0}"
   cp "$FAKE_SERVER_SRC" "$build/tts-server"
   printf '#!/bin/sh\nexit 0\n' > "$build/qwen-codec"
   touch "$build/libggml.so.0.29.0"
@@ -179,6 +181,37 @@ DEVICE=CPU" "$(cat "$tree/engine.conf")" "engine.conf records the build"
   assert_contains "$(cat "$XDG_CONFIG_HOME/piper-tts/config")" "QWEN_VARIANT=customvoice" "variant stored"
   assert_contains "$(htts engine status)" "active:   qwen3" "engine usable afterwards"
   assert_contains "$out" "Done." "completion message"
+}
+
+# case_install_defaults_to_base — without --variant the Base talker is fetched and selected.
+# Args:    none
+# Returns: 0 always
+# Globals: none
+case_install_defaults_to_base() {
+  make_assets good
+  make_fake_toolchain
+  htts engine install qwen3 --cpu >/dev/null 2>&1
+  assert_rc 0 "$?" "install succeeds"
+  assert_file "$(test_engine_tree)/models/$(lib_eval 'qwen3_model_file base')" "base talker installed"
+  assert_contains "$(cat "$XDG_CONFIG_HOME/piper-tts/config")" "QWEN_VARIANT=base" "base stored"
+  assert_contains "$(htts engine status)" "active:   qwen3" "usable without any clone"
+}
+
+# case_install_prints_progress_lines — downloads and the compile report on stderr (GUI streams it).
+# Args:    none
+# Returns: 0 always
+# Globals: none
+case_install_prints_progress_lines() {
+  make_assets good
+  make_fake_toolchain
+  # A slow curl and a slow build make the polling loops fire at least once.
+  printf '#!/bin/sh\nsleep 1.5\nexec %s "$@"\n' "$(command -v curl)" > "$TEST_ROOT/fakebin/curl"
+  chmod +x "$TEST_ROOT/fakebin/curl"
+  local out
+  out="$(FAKE_BUILD_SLEEP=2.5 QWEN_PROGRESS_INTERVAL=1 htts engine install qwen3 --cpu 2>&1 >/dev/null)"
+  assert_rc 0 "$?" "install succeeds"
+  assert_contains "$out" "progress: qwen-talker-0.6b-base-Q8_0.gguf" "download progress line"
+  assert_contains "$out" "progress: compiling build ... 50%" "compile heartbeat with percentage"
 }
 
 # case_install_is_idempotent — a second install rebuilds nothing and refetches nothing.

@@ -166,6 +166,24 @@ test_status_and_remove() {
   fi
 }
 
+# test_status_porcelain — key=value output for the GUI, never a failing status.
+# Args:    none
+# Returns: 0 always
+# Globals: none
+test_status_porcelain() {
+  local out
+  out="$(HTTS_PYTHON="$SANDBOX/bin/curl" HTTS_LID_MODEL="$FIXTURE" cmd_deps status --porcelain)"
+  assert_eq "python=$SANDBOX/bin/curl
+model=$FIXTURE
+system_packages=$(system_python_has_deps && echo 1 || echo 0)
+ready=1" "$out" "porcelain with python and model"
+  out="$(HTTS_PYTHON=/nonexistent HTTS_LID_MODEL="$FIXTURE" cmd_deps status --porcelain)"
+  assert_eq "ready=0" "$(printf '%s\n' "$out" | grep '^ready=')" "no python -> ready=0"
+  assert_eq "python=" "$(printf '%s\n' "$out" | grep '^python=')" "missing python is empty"
+  HTTS_PYTHON=/nonexistent cmd_deps status --porcelain > /dev/null
+  assert_rc 0 "$?" "porcelain status always succeeds"
+}
+
 # test_install_refuses_root — deps install must never run as root.
 # Args:    none
 # Returns: 0 always
@@ -176,6 +194,37 @@ test_install_refuses_root() {
   deps_install 2> /dev/null
   assert_rc 1 "$?" "deps install refuses to run as root"
   rm -f "$SANDBOX/bin/id"
+}
+
+# test_import_check_is_real_and_cached — a venv that cannot import is not trusted; verdicts cache.
+# Args:    none
+# Returns: 0 always
+# Globals: none
+test_import_check_is_real_and_cached() {
+  local broken="$SANDBOX/broken-python" venv
+  # An interpreter whose "import fasttext, num2words" fails (a stale venv after a Python upgrade).
+  printf '#!/bin/sh\necho x >> "%s/probe.log"\nexit 1\n' "$SANDBOX" > "$broken"
+  chmod +x "$broken"
+  pyenv_import_ok "$broken"
+  assert_rc 1 "$?" "failing import is detected"
+  pyenv_import_ok "$broken"
+  assert_eq "1" "$(wc -l < "$SANDBOX/probe.log")" "the verdict is cached (one probe for two calls)"
+  # A changed interpreter (new modification time) is probed again, and may now succeed.
+  printf '#!/bin/sh\nexit 0\n' > "$broken"
+  touch -d '1 hour ago' "$broken"
+  pyenv_import_ok "$broken"
+  assert_rc 0 "$?" "a fixed interpreter passes after the change"
+  # pyenv_python distrusts a marked venv whose interpreter cannot import the packages.
+  venv="$(pyenv_venv_dir)"
+  mkdir -p "$venv/bin"
+  printf '#!/bin/sh\nexit 1\n' > "$venv/bin/python3"
+  chmod +x "$venv/bin/python3"
+  : > "$venv/.deps-ok"
+  if ! system_python_has_deps; then
+    pyenv_python > /dev/null
+    assert_rc 1 "$?" "stale venv with marker is not used"
+  fi
+  rm -rf "$venv"
 }
 
 # main — run every check and print a summary.
@@ -190,6 +239,8 @@ main() {
   test_model_search_order
   test_download_model
   test_status_and_remove
+  test_status_porcelain
+  test_import_check_is_real_and_cached
   test_install_refuses_root
   printf '\ntest_pyenv: %d passed, %d failed\n' "$PASS" "$FAIL"
   [ "$FAIL" -eq 0 ]

@@ -137,7 +137,8 @@ supported_langs_csv() {
 # Returns: 0 always; stdout: de, fr, es, en, or empty when undecided
 # Globals: reads REGEX_DE, REGEX_FR, REGEX_ES, REGEX_EN
 detect_lang_regex() {
-  local text="$1"
+  local text="$1" LC_ALL=C.UTF-8
+  # The UTF-8 locale makes the accent classes match characters, not bytes ("naïve" is not German).
   # First matching pattern wins (the historic order: German before the rest).
   if [[ "$text" =~ $REGEX_DE ]]; then echo de; return; fi
   if [[ "$text" =~ $REGEX_FR ]]; then echo fr; return; fi
@@ -223,14 +224,15 @@ run_text_helper() {
 
 # prepare_chunks_python — segment text with the Python helper.
 # Args:    $1 allowed languages (csv) | $2 default language | $3 raw text
-# Returns: 0 with chunk lines on stdout; 1 when Python, the venv or the model is missing
+# Returns: 0 with chunk lines on stdout; 10 when Python, the venv or the model is missing;
+#          otherwise the helper's own exit code (3 = no language model)
 # Globals: none
 prepare_chunks_python() {
   local allowed="$1" default_lang="$2" text="$3" python model=""
-  python="$(pyenv_python)" || return 1
+  python="$(pyenv_python)" || return 10
   # Several languages need the classifier model; a single language needs none.
   if [[ "$allowed" == *,* ]]; then
-    model="$(langid_model_path)" || return 1
+    model="$(langid_model_path)" || return 10
   fi
   printf '%s' "$text" | run_text_helper "$python" "$model" \
     segment --allowed "$allowed" --default "$default_lang"
@@ -316,6 +318,38 @@ prepare_chunks_fallback() {
   done < <(normalize_text | chunk_text)
 }
 
+# helper_log_file — print the path of the text helper's error log (and keep it small).
+# Args:    none
+# Returns: 0 always; stdout: the log path
+# Globals: reads STATE_DIR
+helper_log_file() {
+  local path="$STATE_DIR/helper.log"
+  mkdir -p "$STATE_DIR" 2> /dev/null || true
+  # A log that grew past 100 KB is cut to its newest quarter.
+  if [ "$(stat -c %s "$path" 2> /dev/null || echo 0)" -gt 102400 ]; then
+    tail -c 25600 "$path" > "$path.new" && mv -f "$path.new" "$path"
+  fi
+  printf '%s' "$path"
+}
+
+# prepare_chunks_try_python — run the Python path, keep its errors in a log, tell the user once.
+# Args:    $1 allowed languages | $2 default language | $3 raw text
+# Returns: 0 with chunk lines on stdout; 1 when the fallback must run
+# Globals: reads STATE_DIR, RUN_DIR
+prepare_chunks_try_python() {
+  local status=0 log_path
+  log_path="$(helper_log_file)"
+  # Helper errors go to the log instead of being hidden.
+  prepare_chunks_python "$1" "$2" "$3" 2>> "$log_path" || status=$?
+  [ "$status" -ne 0 ] || return 0
+  # 10 means "no Python or model here" and 3 "no language model" (both normal); the rest crashed.
+  if [ "$status" -ne 10 ] && [ "$status" -ne 3 ]; then
+    engine_notify_once helper "hyprland-tts: text helper failed" \
+      "Using the simple text pipeline. Details: $log_path"
+  fi
+  return 1
+}
+
 # prepare_chunks — raw text on stdin -> "lang<TAB>sentence" lines, one chunk per line.
 # Args:    $1 allowed languages, comma-separated (e.g. de,en) | $2 default language (optional)
 # Returns: 0 on success (also for empty input); 1 on an invalid language list
@@ -328,7 +362,7 @@ prepare_chunks() {
   lang_in_csv "$default_lang" "$allowed" || default_lang="${allowed%%,*}"
   text="$(cat)"
   # Python path first; any failure (exit code 3 = no model, or a crash) uses the fallback.
-  if chunks="$(prepare_chunks_python "$allowed" "$default_lang" "$text" 2> /dev/null)"; then
+  if chunks="$(prepare_chunks_try_python "$allowed" "$default_lang" "$text")"; then
     [ -z "$chunks" ] || printf '%s\n' "$chunks"
     return 0
   fi

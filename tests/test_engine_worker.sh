@@ -143,6 +143,21 @@ case_engine_stop() {
   assert_rc 0 "$?" "stop when nothing runs is fine"
 }
 
+# case_ensure_during_boot_keeps_booting_worker — a client must wait for a booting worker.
+# Args:    none
+# Returns: 0 always
+# Globals: none
+case_ensure_during_boot_keeps_booting_worker() {
+  test_install_fake_engine
+  export FAKE_TTS_STARTUP_DELAY=1
+  lib_eval 'worker_kick'
+  # The booting worker has not published "ready" yet; a client now asks for the worker.
+  sleep 0.3
+  lib_eval 'worker_ensure'
+  assert_rc 0 "$?" "ensure waited for the booting worker"
+  assert_eq 1 "$(test_event_count start)" "the booting worker was not killed and restarted"
+}
+
 # case_variant_switch_restarts_worker — a worker serving customvoice is replaced after the switch.
 # Args:    none
 # Returns: 0 always

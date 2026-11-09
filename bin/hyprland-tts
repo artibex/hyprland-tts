@@ -7,68 +7,109 @@
 # ==============================================================================
 set -euo pipefail
 
-# --- locate the library directory (works installed or from a git checkout) ----
+# The resolved script path; the modules call back into it (setsid ... __daemon/__worker).
 _self="$(readlink -f "${BASH_SOURCE[0]}")"
 _selfdir="$(dirname "$_self")"
-LIBDIR=""
-for _cand in \
-  "${HYPRLAND_TTS_LIB:-}" \
-  "$_selfdir/../lib/hyprland-tts" \
-  "$_selfdir/../lib" \
-  "/usr/lib/hyprland-tts" \
-  "$HOME/.local/lib/hyprland-tts"; do
-  if [ -n "$_cand" ] && [ -f "$_cand/common.sh" ]; then LIBDIR="$_cand"; break; fi
-done
-[ -n "$LIBDIR" ] || { echo "hyprland-tts: cannot locate library directory" >&2; exit 1; }
 
-# Modules call back into this script (setsid ... __daemon/__worker), so they need its path.
-export HTTS_SELF="$_self"
-# shellcheck source=/dev/null
-source "$LIBDIR/common.sh"
-# Module order matters only for readability: every module defines functions, nothing runs.
-for _m in text router model image keybind engine qwen3 qwen3_install worker voices player \
-  setup hover; do
-  # shellcheck source=/dev/null
-  source "$LIBDIR/$_m.sh"
-done
-# pyenv.sh (language-ID helper environment) is optional so older installs keep working.
-# shellcheck source=/dev/null
-[ -f "$LIBDIR/pyenv.sh" ] && source "$LIBDIR/pyenv.sh"
-
-# --- GUI launcher -------------------------------------------------------------
-# Find a python3 that actually has the GTK bindings. A bare `python3` lookup
-# trusts $PATH, which on many desktops is shadowed by a user-managed interpreter
-# (pyenv/mise/conda/uv/asdf) that has no idea gtk4/libadwaita exist — that
-# interpreter is what pacman-installed PyGObject is NOT installed into. This bit
-# a real user: `hyprland-tts gui` reported the stack missing while
-# `pacman -S gtk4 libadwaita python-gobject` said "up to date". Root cause: PATH.
-# Fix: probe PATH's python3 first, then fall back to the system interpreter by
-# absolute path (sudo's sanitized PATH happens to hit this one, which is why it
-# "worked" under sudo — that is a red herring, NOT a real fix; see the root guard
-# in main(), running the GUI as root breaks Wayland/GTK entirely).
-_gui_python() {
-  local cand
-  for cand in python3 /usr/bin/python3; do
-    have "$cand" || continue
-    if "$cand" -c 'import gi; gi.require_version("Gtk","4.0"); gi.require_version("Adw","1")' \
-         >/dev/null 2>&1; then
-      printf '%s' "$cand"; return 0
+# locate_library_dir — find the directory holding common.sh (installed or git checkout).
+# Args:    none
+# Returns: 0 when found; 1 otherwise; stdout: the directory
+# Globals: reads HYPRLAND_TTS_LIB, _selfdir, HOME
+locate_library_dir() {
+  local candidate
+  # An explicit override first, then installed, checkout and system locations.
+  for candidate in "${HYPRLAND_TTS_LIB:-}" "$_selfdir/../lib/hyprland-tts" "$_selfdir/../lib" \
+    "/usr/lib/hyprland-tts" "$HOME/.local/lib/hyprland-tts"; do
+    # A directory only counts when it really holds the shared module.
+    if [ -n "$candidate" ] && [ -f "$candidate/common.sh" ]; then
+      printf '%s' "$candidate"
+      return 0
     fi
   done
+  # No candidate directory held common.sh.
   return 1
 }
 
-cmd_gui() {
-  local gui=""
-  if gui="$(command -v hyprland-tts-gui 2>/dev/null)"; then :
-  elif [ -x "$_selfdir/../gui/hyprland-tts-gui" ]; then gui="$_selfdir/../gui/hyprland-tts-gui"
-  else die "GUI component not found."
-  fi
+# _gui_python — find a python3 that really has the GTK bindings.
+# Args:    none
+# Returns: 0 when one exists; 1 otherwise; stdout: the interpreter command
+# Globals: none
+# Notes:   A bare PATH python3 may be a user-managed one without the system PyGObject (Agent.md §5).
+_gui_python() {
+  local candidate
+  for candidate in python3 /usr/bin/python3; do
+    # Skip interpreters that are not installed at all.
+    have "$candidate" || continue
+    # The import probe decides, not the mere existence of an interpreter.
+    if "$candidate" -c 'import gi; gi.require_version("Gtk","4.0"); gi.require_version("Adw","1")' \
+      >/dev/null 2>&1; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  # No candidate directory held common.sh.
+  return 1
+}
 
-  local py
-  py="$(_gui_python)" || die "GUI needs GTK4 + libadwaita + PyGObject for python3. Install them:\n  sudo pacman -S --needed gtk4 libadwaita python-gobject\n\nIf they're already installed and this still fails, another 'python3' earlier in\nyour PATH (pyenv/mise/conda/uv/asdf) is shadowing the system interpreter that\nthose packages install into. Verify with:\n  which python3\n  /usr/bin/python3 -c 'import gi'"
-  # invoke python3 explicitly on the script path (bypasses its #!/usr/bin/env
-  # shebang, so this always runs with the interpreter we just validated)
+# gui_python_error_text — print the explanation shown when no python3 has the GTK bindings.
+# Args:    none
+# Returns: 0 always; stdout: the message text (die expands any escapes)
+# Globals: none
+gui_python_error_text() {
+  cat <<'TEXT'
+GUI needs GTK4 + libadwaita + PyGObject for python3. Install them:
+  sudo pacman -S --needed gtk4 libadwaita python-gobject
+
+If they're already installed and this still fails, another 'python3' earlier in
+your PATH (pyenv/mise/conda/uv/asdf) is shadowing the system interpreter that
+those packages install into. Verify with:
+  which python3
+  /usr/bin/python3 -c 'import gi'
+TEXT
+}
+
+# root_refusal_text — print the explanation shown when the tool runs as root.
+# Args:    none
+# Returns: 0 always; stdout: the message text, ending in "hyprland-tts " for the command line
+# Globals: none
+root_refusal_text() {
+  cat <<'TEXT'
+Do not run hyprland-tts as root or with sudo.
+It manages files under your own $HOME (~/.config, ~/.local) and talks to your
+Wayland session — both are wrong or unreachable as root. Run it as your normal
+desktop user:
+  hyprland-tts 
+TEXT
+}
+
+# gui_script_path — find the GUI script (installed binary first, then the checkout).
+# Args:    none
+# Returns: 0 when found; exits 1 via die otherwise; stdout: the path
+# Globals: reads _selfdir
+gui_script_path() {
+  local gui
+  # The installed command wins over the checkout copy next to this script.
+  if gui="$(command -v hyprland-tts-gui 2>/dev/null)"; then
+    printf '%s' "$gui"
+  elif [ -x "$_selfdir/../gui/hyprland-tts-gui" ]; then
+    # The checkout copy is the fallback for git-checkout users.
+    printf '%s' "$_selfdir/../gui/hyprland-tts-gui"
+  else
+    die "GUI component not found."
+  fi
+}
+
+# cmd_gui — start the graphical manager with a python3 that has GTK.
+# Args:    $1.. <arguments passed to the GUI>
+# Returns: replaces the shell on success; exits 1 via die when GUI or GTK python is missing
+# Globals: none
+cmd_gui() {
+  local gui py
+  gui="$(gui_script_path)"
+  # Without a GTK python the GUI cannot start; the message explains the PATH trap.
+  py="$(_gui_python)" || die "$(gui_python_error_text)"
+  # Calling the interpreter explicitly bypasses the script's own shebang, so the probed
+  # interpreter is exactly the one that runs the GUI.
   exec "$py" "$gui" "$@"
 }
 
@@ -86,32 +127,41 @@ USAGE
   hyprland-tts stop                  Stop playback (the warm engine worker keeps running)
   hyprland-tts ctl <cmd>             next|prev|restart|faster|slower|
                                      pause|resume|toggle|stop|status
-  hyprland-tts engine <sub>          status|install qwen3 [--cpu|--vulkan]
+  hyprland-tts engine <sub>          status [--porcelain]|install qwen3 [--cpu|--vulkan]
                                      [--variant base|customvoice]|remove qwen3|
-                                     use auto|qwen3|piper|start|stop
-  hyprland-tts voice <sub>           list|add <name> <wav> <transcript>|remove <name>|
-                                     set <lang> <voice>
+                                     use auto|qwen3|piper|variant base|customvoice|
+                                     config idle <minutes 1-240>|start|stop
+  hyprland-tts voice <sub>           list [--porcelain]|add <name> <wav> <transcript>|
+                                     remove <name>|set <lang> <voice>|info <name>
+  hyprland-tts deps <sub>            status [--porcelain]|install|remove  (language helpers)
   hyprland-tts model <sub>           list|catalog|install|install-url|remove|default|fallback
   hyprland-tts keybind <sub>         list|set|check|reset  (rebind shortcuts safely)
   hyprland-tts gui                   Graphical voice + shortcut manager
   hyprland-tts setup                 Wire keybinds into Hyprland
   hyprland-tts uninstall             Remove keybinds (keep models)
-  hyprland-tts purge                 Remove keybinds AND models/state/config
+  hyprland-tts purge [--yes|--keep-voices]
+                                     Remove keybinds AND models/state/config/engines/caches
   hyprland-tts help                  Show this help
 EOF
 }
 
+# refuse_root — stop every subcommand when running as root (unless explicitly allowed).
+# Args:    $1.. <the command line, repeated in the message>
+# Returns: 0 for a normal user or with HYPRLAND_TTS_ALLOW_ROOT=1; exits 1 via die under root
+# Globals: reads HYPRLAND_TTS_ALLOW_ROOT
 refuse_root() {
+  # The escape hatch is meant for packaging and CI only.
   [ "${HYPRLAND_TTS_ALLOW_ROOT:-}" = "1" ] && return 0
-  [ "$(id -u)" -ne 0 ] || die "Do not run hyprland-tts as root or with sudo.\nIt manages files under your own \$HOME (~/.config, ~/.local) and talks to your\nWayland session — both are wrong or unreachable as root. Run it as your normal\ndesktop user:\n  hyprland-tts $*"
+  # Root has no access to the user's Wayland session and would write under /root.
+  [ "$(id -u)" -ne 0 ] || die "$(root_refusal_text)$*"
 }
 
-# command_deps — run the optional language-ID environment manager when it is installed.
+# command_deps — run the language-ID environment manager.
 # Args:    $1.. <deps subcommand arguments>
 # Returns: the subcommand's status; exits 1 when pyenv.sh is not available
 # Globals: none
 command_deps() {
-  # cmd_deps comes from the optional pyenv.sh module; absent means a pre-2.0 library set.
+  # cmd_deps comes from pyenv.sh; its absence means an incomplete library set.
   declare -F cmd_deps >/dev/null || die "'deps' is not available in this installation"
   cmd_deps "$@"
 }
@@ -122,7 +172,9 @@ command_deps() {
 # Globals: none
 main() {
   refuse_root "$@"
-  local cmd="${1:-help}"; shift || true
+  local cmd="${1:-help}"
+  # The command word is consumed; a bare invocation has no argument to shift.
+  shift || true
   # One line per command; the work lives in the cmd_* / command_* functions.
   case "$cmd" in
     speak)      cmd_speak "$@" ;; # read the selection aloud
@@ -133,16 +185,30 @@ main() {
     stop)       cmd_stop ;; # stop playback only
     engine)     cmd_engine "$@" ;; # engine install/selection/worker
     voice)      cmd_voice "$@" ;; # voice choice and cloning
-    deps)       command_deps "$@" ;; # optional language-ID environment
+    deps)       command_deps "$@" ;; # language-ID environment
     model)      cmd_model "$@" ;; # Piper voice manager
     keybind)    cmd_keybind "$@" ;; # shortcut manager
     gui)        cmd_gui "$@" ;; # graphical manager
     setup)      cmd_setup ;; # wire keybinds into Hyprland
     uninstall)  cmd_uninstall ;; # remove keybind wiring
-    purge)      cmd_purge ;; # remove wiring and user data
-    -h|--help|help) usage ;;
-    *) log "unknown command: $cmd"; usage; exit 1 ;;
+    purge)      cmd_purge "$@" ;; # remove wiring and all user data
+    -h|--help|help) usage ;; # the overview
+    *) log "unknown command: $cmd"; usage; exit 1 ;; # a typo gets the overview too
   esac
 }
+
+# Find the library first; nothing else can run without it.
+LIBDIR="$(locate_library_dir)" ||
+  { echo "hyprland-tts: cannot locate library directory" >&2; exit 1; }
+# Modules call back into this script (setsid ... __daemon/__worker), so they need its path.
+export HTTS_SELF="$_self"
+# shellcheck source=/dev/null
+source "$LIBDIR/common.sh"
+# Module order matters only for readability: every module defines functions, nothing runs.
+for _m in text router model image keybind engine qwen3 qwen3_install worker voices pyenv player \
+  setup hover; do
+  # shellcheck source=/dev/null
+  source "$LIBDIR/$_m.sh"
+done
 
 main "$@"

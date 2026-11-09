@@ -81,6 +81,8 @@ case_stop_keeps_worker_warm() {
   printf '%s' "$TWO_PARAGRAPHS" > "$FAKE_SELECTION"
   htts speak >/dev/null 2>&1
   test_wait_until 20 daemon_running
+  # Stopping while the model still loads would only prove the worker is "starting".
+  test_wait_until 20 test_worker_is_running
   htts stop >/dev/null 2>&1
   test_wait_until 5 test_pid_dead "$(cat "$HYPRLAND_TTS_RUN_DIR/daemon.pid" 2>/dev/null)"
   assert_rc 0 "$?" "daemon stopped"
@@ -200,6 +202,12 @@ case_controls_work_on_a_live_player() {
   sleep 0.5
   assert_eq "idle" "$(htts ctl status)" "idle after stop"
 }
+
+# test_worker_is_running — succeed once the engine status reports a serving worker.
+# Args:    none
+# Returns: 0 when the worker is running; 1 otherwise
+# Globals: none
+test_worker_is_running() { [[ "$(htts engine status --porcelain)" == *"worker=running"* ]]; }
 
 # test_status_has_two_items — succeed once mpv reports both chunks in its playlist.
 # Args:    none

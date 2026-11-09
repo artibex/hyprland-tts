@@ -1,517 +1,3039 @@
 #!/usr/bin/env python3
-# ==============================================================================
-# hyprland-tts-gui — graphical voice + shortcut manager for hyprland-tts
-# ------------------------------------------------------------------------------
-# A thin, defensive GTK4 / libadwaita front end. It contains NO TTS, download,
-# or keybind logic itself: every action shells out to the `hyprland-tts` CLI
-# (`model …`, `keybind …`), which is the single source of truth and enforces all
-# validation/security. See Agent.md.
-# ==============================================================================
-import os
-import sys
-import shutil
-import threading
-import subprocess
+"""Graphical manager for hyprland-tts: engine, voices, language detection and shortcuts.
 
-# Refuse root outright: as root this has no access to the caller's Wayland
-# session (hence "Authorization required" / "Gtk couldn't be initialized"
-# crashes) and would read/write ~/.config, ~/.local under /root instead of the
-# real user's home. The bin/hyprland-tts wrapper already blocks this; this
-# check is defense-in-depth for anyone invoking hyprland-tts-gui directly.
-if hasattr(os, "geteuid") and os.geteuid() == 0 and os.environ.get("HYPRLAND_TTS_ALLOW_ROOT") != "1":
-    sys.stderr.write(
-        "hyprland-tts-gui: refusing to run as root/with sudo.\n"
-        "It needs your desktop session (Wayland) and your own $HOME — run it as\n"
-        "your normal user instead.\n"
-    )
-    sys.exit(1)
+This is a thin GTK4 / libadwaita skin. It contains no speech, download, voice-cloning or
+keybind logic of its own: every action shells out to the ``hyprland-tts`` CLI (``engine``,
+``voice``, ``deps``, ``model``, ``keybind``), which stays the single source of truth and
+enforces all validation. Short commands run on a worker thread and report through toasts; long
+ones (engine and dependency installs) stream their progress lines into a log view and can be
+cancelled. See Agent.md for the architecture.
+"""
+
+# Standard library: environment, patterns, file lookup, process control and threads.
+import contextlib
+import functools
+import os
+import re
+
+# shutil finds the CLI on PATH; signal and subprocess control the child processes.
+import shutil
+import signal
+import subprocess
+import sys
+
+# tempfile holds private transcripts; threading keeps the window responsive.
+import tempfile
+import threading
+
+# Plain containers for parsed CLI output.
+from collections import namedtuple
+from dataclasses import dataclass, field
+
+
+def _refuse_root_user():
+    """Exit when running as root, because root cannot reach the user's desktop session.
+
+    As root the Wayland session is unreachable ("Authorization required") and ~/.config would
+    resolve below /root. bin/hyprland-tts blocks this too; this is defense in depth for
+    anyone starting the GUI script directly.
+
+    Args:
+        None.
+
+    Returns:
+        None; terminates the process with status 1 for root unless the CI escape hatch is set.
+    """
+    # Only POSIX systems have geteuid; elsewhere there is nothing to refuse.
+    is_root = hasattr(os, "geteuid") and os.geteuid() == 0
+    # The documented escape hatch exists for packaging and CI only.
+    escape_hatch_set = os.environ.get("HYPRLAND_TTS_ALLOW_ROOT") == "1"
+    if is_root and not escape_hatch_set:
+        # Explain the real fix instead of letting GTK die with an opaque error.
+        sys.stderr.write(
+            "hyprland-tts-gui: refusing to run as root/with sudo.\n"
+            "It needs your desktop session (Wayland) and your own $HOME — run it as\n"
+            "your normal user instead.\n"
+        )
+        sys.exit(1)
+
+
+def _gtk_stack_importable():
+    """Tell whether the running interpreter can load GTK 4 and libadwaita.
+
+    Args:
+        None.
+
+    Returns:
+        True when PyGObject, Gtk 4.0 and Adw 1 can be imported; False otherwise.
+    """
+    try:
+        # Importing and pinning the versions is exactly what the real import below does.
+        import gi
+
+        gi.require_version("Gtk", "4.0")
+        gi.require_version("Adw", "1")
+    except (ImportError, ValueError):
+        # Missing PyGObject or a missing typelib both mean "not usable here".
+        return False
+    return True
 
 
 def _reexec_with_gtk_python():
-    """If the interpreter running this script (whatever invoked it — a
-    terminal, `hyprland-tts gui`, or a desktop launcher's own Exec= using this
-    script's #!/usr/bin/env python3 shebang directly) can't import GTK4/
-    libadwaita, but /usr/bin/python3 can, re-exec under that one instead of
-    just failing.
+    """Re-run this script under /usr/bin/python3 when the current interpreter lacks GTK.
 
-    Why this exists: `bin/hyprland-tts gui` already probes for a working
-    python3 (see _gui_python there) because a PATH-shadowing interpreter
-    (pyenv/mise/conda/uv/asdf) can sit ahead of /usr/bin/python3 and lacks the
-    system PyGObject install — that was a real bug a user hit. But a desktop
-    launcher's Exec= can invoke this script directly, bypassing that wrapper
-    entirely and falling back to this file's own shebang — which re-triggers
-    the exact same class of failure, silently, since a launcher has no
-    terminal to show the resulting ModuleNotFoundError in. Doing the same
-    probe-and-reexec here means it's fixed regardless of launch path.
+    A PATH-shadowing interpreter (pyenv, mise, conda, uv, asdf) has no pacman-installed
+    PyGObject. A desktop launcher that invokes this file directly would then fail silently
+    because it has no terminal to show the ImportError, so the probe-and-reexec lives here
+    as well as in bin/hyprland-tts (_gui_python).
+
+    Args:
+        None.
+
+    Returns:
+        None; replaces the process when a working system interpreter exists, otherwise returns.
     """
+    # A marker stops an endless loop when the system interpreter fails too.
     if os.environ.get("_HYPRLAND_TTS_GUI_REEXECED") == "1":
-        return  # already retried once; don't loop if /usr/bin/python3 also fails
-    try:
-        import gi
-        gi.require_version("Gtk", "4.0")
-        gi.require_version("Adw", "1")
-        return  # current interpreter already works, nothing to do
-    except Exception:
-        pass
-    candidate = "/usr/bin/python3"
-    if os.path.realpath(sys.executable) == os.path.realpath(candidate):
-        return  # already running it and it still failed above
-    if os.access(candidate, os.X_OK):
+        return
+    # The current interpreter already works, so nothing needs to change.
+    if _gtk_stack_importable():
+        return
+    system_python = "/usr/bin/python3"
+    # Re-running the very same failing interpreter would achieve nothing.
+    if os.path.realpath(sys.executable) == os.path.realpath(system_python):
+        return
+    if os.access(system_python, os.X_OK):
+        # Set the marker before exec so the child cannot recurse.
         os.environ["_HYPRLAND_TTS_GUI_REEXECED"] = "1"
-        try:
-            os.execv(candidate, [candidate, os.path.realpath(__file__), *sys.argv[1:]])
-        except Exception:
-            pass  # fall through to the normal import-error handling below
+        # On failure execution simply continues to the normal "install GTK" message below.
+        with contextlib.suppress(OSError):
+            os.execv(system_python, [system_python, os.path.realpath(__file__), *sys.argv[1:]])
 
 
+# Root is refused before any GTK or session access happens.
+_refuse_root_user()
 _reexec_with_gtk_python()
 
-# Fail with a clear, non-scary message if the GTK stack isn't present.
+# A clear, non-scary message beats a traceback when the GTK stack is absent.
 try:
     import gi
+
     gi.require_version("Gtk", "4.0")
     gi.require_version("Adw", "1")
-    from gi.repository import Gtk, Adw, GLib, Gio, Gdk
-except Exception as exc:  # ImportError or ValueError from require_version
+    # The toolkit namespaces the pages use: Adw widgets, Gdk key events, Pango ellipsizing.
+    from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
+except (ImportError, ValueError) as import_error:
     sys.stderr.write(
         "hyprland-tts-gui needs GTK4 + libadwaita + PyGObject.\n"
         "Install them with:\n"
         "  sudo pacman -S --needed gtk4 libadwaita python-gobject\n"
-        f"\n(details: {exc})\n"
+        f"\n(details: {import_error})\n"
     )
     sys.exit(1)
 
+# Reverse-DNS application id; GLib uses it to keep a single running instance.
 APP_ID = "com.github.artibex.hyprland_tts"
+# CLI executable name; HYPRLAND_TTS_CLI lets tests and packagers point at another one.
 CLI = os.environ.get("HYPRLAND_TTS_CLI", "hyprland-tts")
 
+# Seconds a status query may take before the GUI reports a timeout.
+QUERY_TIMEOUT = 15
+# Seconds a short write command (set a voice, switch engine) may take.
+TASK_TIMEOUT = 20
+# Seconds for commands that download a voice model.
+DOWNLOAD_TIMEOUT = 600
+# Seconds for `voice add`, which encodes the reference recording.
+VOICE_ADD_TIMEOUT = 300
+# Seconds for `engine start`; the CLI itself waits up to QWEN_START_TIMEOUT (90) for the model.
+WORKER_START_TIMEOUT = 150
+# Seconds a cancelled job gets to exit after SIGTERM before it is killed.
+KILL_GRACE_SECONDS = 3
+# Oldest log lines are dropped beyond this count so a long build cannot exhaust memory.
+MAX_LOG_LINES = 800
+# Valid range of the worker idle timeout accepted by `engine config idle`.
+IDLE_MINUTES_RANGE = (1, 240)
 
-def _resolve_cli():
-    found = shutil.which(CLI)
-    if found:
-        return found
-    here = os.path.dirname(os.path.realpath(__file__))
-    cand = os.path.abspath(os.path.join(here, "..", "bin", "hyprland-tts"))
-    return cand if os.access(cand, os.X_OK) else None
+# Engine choices: CLI value, title and one-line explanation, in display order.
+ENGINE_CHOICES = (
+    ("auto", "Automatic", "Qwen3-TTS when it is installed and usable, otherwise Piper"),
+    ("qwen3", "Qwen3-TTS (neural)", "Natural voices on the GPU; falls back to Piper on errors"),
+    ("piper", "Piper (light)", "Fast and small, but more robotic; no engine install needed"),
+)
+# Install backends: CLI flag (empty for automatic) and the title shown to the user.
+BACKEND_CHOICES = (
+    ("", "Automatic (Vulkan GPU if possible, else CPU)"),
+    ("--vulkan", "Vulkan (GPU, about 1.2 GB RAM)"),
+    ("--cpu", "CPU only (slower, 3-4 GB RAM)"),
+)
+# Model variants: CLI value and title; Base is the one that supports native cloned voices.
+VARIANT_CHOICES = (
+    ("base", "Base: native cloned voice per language (recommended)"),
+    ("customvoice", "CustomVoice: nine preset speakers"),
+)
+# Display names of the languages the neural engine can speak.
+LANGUAGE_NAMES = {
+    "de": "German", "en": "English", "fr": "French", "es": "Spanish", "it": "Italian",
+    "pt": "Portuguese", "ru": "Russian", "zh": "Chinese", "ja": "Japanese", "ko": "Korean",
+}
+# Entry that clears an explicit voice choice so the CLI default applies again.
+DEFAULT_VOICE_LABEL = "Default (automatic)"
+# A voice name as the CLI accepts it; used only to enable the Add button early.
+VOICE_NAME_PATTERN = re.compile(r"^[a-z0-9_-]+$")
+# Written next to a cloned voice when the user supplies no licence file of their own.
+CONSENT_NOTE = (
+    "Reference recording added through the hyprland-tts GUI. The user confirmed that they "
+    "hold the rights, a licence or the speaker's consent to create a synthetic voice from it.\n"
+)
+# Terminal colour escape sequences that build tools print and a TextView cannot render.
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+# Modifier masks and the Hyprland names they map to, in the order Hyprland expects them.
+MODIFIER_NAMES = (
+    (Gdk.ModifierType.SUPER_MASK, "SUPER"),
+    (Gdk.ModifierType.CONTROL_MASK, "CTRL"),
+    (Gdk.ModifierType.ALT_MASK, "ALT"),
+    (Gdk.ModifierType.SHIFT_MASK, "SHIFT"),
+)
+# Key names that are only modifiers and therefore never form a shortcut on their own.
+MODIFIER_KEY_NAMES = frozenset((
+    "Super_L", "Super_R", "Control_L", "Control_R", "Alt_L", "Alt_R",
+    "Shift_L", "Shift_R", "Meta_L", "Meta_R",
+))
+
+# Result of one finished CLI call; unpacks like the (rc, stdout, stderr) tuple it replaces.
+CliResult = namedtuple("CliResult", "returncode stdout stderr")
+# One cloned voice as listed by `voice list --porcelain`; source is "user" or "shipped".
+ClonedVoice = namedtuple("ClonedVoice", "name source")
+# Parsed `voice list --porcelain`: language -> voice, preset names, cloned voices.
+VoiceCatalog = namedtuple("VoiceCatalog", "assignments presets cloned")
 
 
-CLI_PATH = _resolve_cli()
+@dataclass
+class EngineStatus:
+    """Parsed `engine status --porcelain` output with display-safe defaults."""
+
+    selected: str = "auto"
+    active: str = "piper"
+    qwen3_installed: bool = False
+    # Which model variant and compute device the installed engine uses (empty when unknown).
+    qwen3_variant: str = ""
+    qwen3_device: str = ""
+    qwen3_reason: str = ""
+    worker: str = "stopped"
+    # Worker process state, and the loopback port it listens on while running.
+    worker_port: str = ""
+    idle_minutes: int = 10
+    piper_languages: list = field(default_factory=list)
+    languages: list = field(default_factory=list)
+    # False when no recognised key was present, so pages can say "unknown" instead of guessing.
+    known: bool = False
 
 
-def run_cli(args, timeout=None):
-    """Run the CLI. Returns (rc, stdout, stderr). Never raises."""
-    if not CLI_PATH:
-        return (127, "", "hyprland-tts CLI not found in PATH")
+@dataclass
+class DepsStatus:
+    """Parsed `deps status --porcelain` output with display-safe defaults."""
+
+    python: str = ""
+    model: str = ""
+    system_packages: bool = False
+    # True when both the Python helpers and the model are usable.
+    ready: bool = False
+    # False when the output carried no recognised key at all.
+    known: bool = False
+
+
+def parse_key_values(text):
+    """Parse ``key=value`` lines, ignoring blank, malformed and comment lines.
+
+    Args:
+        text: Raw porcelain output.
+
+    Returns:
+        Dict of key to stripped value; later duplicates win.
+    """
+    pairs = {}
+    for raw_line in text.splitlines():
+        # partition never raises, so a line without "=" simply yields an empty separator.
+        key, separator, value = raw_line.partition("=")
+        key = key.strip()
+        # Only simple lowercase identifiers count as keys; anything else is noise.
+        if separator and re.fullmatch(r"[a-z0-9_]+", key):
+            pairs[key] = value.strip()
+    return pairs
+
+
+def split_csv(value):
+    """Split a comma-separated list, dropping empty items.
+
+    Args:
+        value: Text such as "de,en,fr" (may be empty).
+
+    Returns:
+        List of stripped, non-empty items.
+    """
+    # Empty segments (from "a,,b" or an empty string) carry no information.
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def to_int(value, default):
+    """Convert text to an int without raising.
+
+    Args:
+        value: Text that should hold digits.
+        default: Result when the text is not a non-negative integer.
+
+    Returns:
+        The parsed integer or the default.
+    """
+    # isdigit rejects negatives and junk, which no setting here may take.
+    return int(value) if value.isdigit() else default
+
+
+def parse_engine_status(text):
+    """Turn `engine status --porcelain` output into an EngineStatus.
+
+    Unknown keys are ignored and missing keys keep their defaults.
+
+    Args:
+        text: Raw stdout of the command.
+
+    Returns:
+        An EngineStatus; ``known`` is False when nothing recognisable was found.
+    """
+    pairs = parse_key_values(text)
+    status = EngineStatus()
+    # Defaults stay in place for every key the CLI did not print.
+    status.selected = pairs.get("selected", status.selected) or "auto"
+    status.active = pairs.get("active", status.active) or "piper"
+    status.qwen3_installed = pairs.get("qwen3_installed") == "1"
+    status.qwen3_variant = pairs.get("qwen3_variant", "")
+    # The device and the CLI's own reason explain why Qwen3 is or is not in use.
+    status.qwen3_device = pairs.get("qwen3_device", "")
+    status.qwen3_reason = pairs.get("qwen3_reason", "")
+    status.worker = pairs.get("worker", "") or "stopped"
+    status.worker_port = pairs.get("worker_port", "")
+    # Idle minutes and the language lists feed the worker row and the voice rows.
+    status.idle_minutes = to_int(pairs.get("idle_minutes", ""), status.idle_minutes)
+    status.piper_languages = split_csv(pairs.get("piper_languages", ""))
+    status.languages = split_csv(pairs.get("languages", ""))
+    # Recognising at least one engine key proves the CLI speaks the contract.
+    status.known = any(key in pairs for key in ("selected", "active", "worker"))
+    return status
+
+
+def parse_deps_status(text):
+    """Turn `deps status --porcelain` output into a DepsStatus.
+
+    Args:
+        text: Raw stdout of the command.
+
+    Returns:
+        A DepsStatus; ``known`` is False when nothing recognisable was found.
+    """
+    pairs = parse_key_values(text)
+    # Paths come through verbatim; the two flags are the CLI's 0/1 convention.
+    status = DepsStatus(
+        python=pairs.get("python", ""),
+        model=pairs.get("model", ""),
+        system_packages=pairs.get("system_packages") == "1",
+        ready=pairs.get("ready") == "1",
+    )
+    status.known = any(key in pairs for key in ("python", "model", "ready"))
+    return status
+
+
+def parse_voice_list(text):
+    """Parse `voice list --porcelain` (tab-separated assign / preset / cloned lines).
+
+    Args:
+        text: Raw stdout of the command.
+
+    Returns:
+        A VoiceCatalog; malformed lines are skipped and "-" assignments become "".
+    """
+    assignments, presets, cloned = {}, [], []
+    for line in text.splitlines():
+        fields = line.split("\t")
+        kind = fields[0]
+        # "assign <lang> <voice>" shows the voice the language resolves to ("-" = none).
+        if kind == "assign" and len(fields) >= 3:
+            assignments[fields[1]] = "" if fields[2] == "-" else fields[2]
+        elif kind == "preset" and len(fields) >= 2:
+            presets.append(fields[1])
+        elif kind == "cloned" and len(fields) >= 2:
+            # A missing source column is treated as the user's own voice (safest to show).
+            cloned.append(ClonedVoice(fields[1], fields[2] if len(fields) >= 3 else "user"))
+    return VoiceCatalog(assignments, presets, cloned)
+
+
+def parse_installed_voices(text):
+    """Parse `model list --porcelain` (seven tab-separated fields per Piper voice).
+
+    Args:
+        text: Raw stdout of the command.
+
+    Returns:
+        List of dicts with id, lang, name, size, default, last and fallback.
+    """
+    rows = []
+    for line in text.splitlines():
+        parts = line.split("\t")
+        # Rows with another field count come from a different CLI version and are skipped.
+        if len(parts) == 7:
+            rows.append({
+                "id": parts[0], "lang": parts[1], "name": parts[2], "size": parts[3],
+                "default": parts[4] == "1", "last": parts[5] == "1",
+                "fallback": parts[6] == "1",
+            })
+    return rows
+
+
+def parse_catalog_voices(text):
+    """Parse `model catalog --porcelain` (six tab-separated fields per downloadable voice).
+
+    Args:
+        text: Raw stdout of the command.
+
+    Returns:
+        List of dicts with key, lang, model, quality, installed and label.
+    """
+    rows = []
+    for line in text.splitlines():
+        parts = line.split("\t")
+        # Only complete six-field rows are real catalogue entries.
+        if len(parts) == 6:
+            rows.append({
+                "key": parts[0], "lang": parts[1], "model": parts[2],
+                "quality": parts[3], "installed": parts[4] == "1", "label": parts[5],
+            })
+    return rows
+
+
+def voices_for_variant(catalog, variant):
+    """Pick the voice names that make sense for the installed Qwen3 model variant.
+
+    Args:
+        catalog: A VoiceCatalog.
+        variant: "base", "customvoice" or "" when unknown.
+
+    Returns:
+        Voice names: cloned ones for Base, presets for CustomVoice, both when unknown.
+    """
+    cloned_names = [voice.name for voice in catalog.cloned]
+    # The Base talker only speaks cloned voices; CustomVoice only its built-in presets.
+    if variant == "base":
+        return cloned_names
+    if variant == "customvoice":
+        return list(catalog.presets)
+    # Without a known variant, offering everything beats hiding a valid choice.
+    return list(catalog.presets) + cloned_names
+
+
+def describe_active_engine(status):
+    """Name the engine that will speak, for the status row.
+
+    Args:
+        status: An EngineStatus.
+
+    Returns:
+        Human-readable engine name.
+    """
+    # Unknown status is reported as such rather than guessing an engine.
+    if not status.known:
+        return "Unknown (could not read the engine status)"
+    return "Qwen3-TTS (neural)" if status.active == "qwen3" else "Piper (light)"
+
+
+def describe_qwen3(status):
+    """Explain the state of Qwen3-TTS, including why it is inactive.
+
+    Args:
+        status: An EngineStatus.
+
+    Returns:
+        One sentence for the Qwen3 status row.
+    """
+    # An active engine needs no excuse; show what it runs on.
+    if status.active == "qwen3":
+        device = describe_device(status.qwen3_device)
+        return f"Active: {status.qwen3_variant or 'unknown'} model on {device}"
+    # The CLI's own reason is the most precise explanation available.
+    if status.qwen3_reason:
+        return f"Inactive: {status.qwen3_reason}"
+    if status.selected == "piper":
+        return "Inactive: the engine is set to Piper"
+    # Not installed is the most common reason, so it gets its own message.
+    if not status.qwen3_installed:
+        return "Inactive: not installed yet (see “Install Qwen3-TTS” below)"
+    return "Inactive: installed, but it has no usable voice (the Base model needs a cloned voice)"
+
+
+def describe_device(device):
+    """Turn the engine device name into plain words.
+
+    Args:
+        device: Value of qwen3_device, e.g. "Vulkan0", "CPU" or "".
+
+    Returns:
+        Text such as "GPU (Vulkan0)" or "CPU".
+    """
+    # Vulkan devices are GPUs; everything else is shown verbatim.
+    if device.lower().startswith("vulkan"):
+        return f"GPU ({device})"
+    return device or "an unknown device"
+
+
+def describe_worker(status):
+    """Describe the on-demand worker process for the status row.
+
+    Args:
+        status: An EngineStatus.
+
+    Returns:
+        Text such as "Running on port 41234 · exits after 10 min idle".
+    """
+    # Starting is a transient state worth naming; it explains a slow first sentence.
+    if status.worker == "starting":
+        return "Starting: loading the model…"
+    if status.worker == "running":
+        port = f" on port {status.worker_port}" if status.worker_port else ""
+        # A running worker tells the user when its memory will be released.
+        return f"Running{port} · exits after {status.idle_minutes} min idle"
+    # The worker is on demand, so "stopped" is normal and not an error.
+    return "Stopped: starts by itself on the next speak"
+
+
+def describe_deps(status):
+    """Summarise the language-detection helper environment.
+
+    Args:
+        status: A DepsStatus.
+
+    Returns:
+        Text for the status row.
+    """
+    # Without the porcelain contract nothing reliable can be said.
+    if not status.known:
+        return "Unknown (could not read the dependency status)"
+    if status.ready:
+        return "Ready: per-sentence language detection and number normalisation are active"
+    # Spell out the consequence of missing helpers so the user knows what is lost.
+    return "Not installed: the simple built-in language router is used"
+
+
+def last_message_line(text):
+    """Return the last non-empty line, without the CLI's "error:" prefix.
+
+    Args:
+        text: Multi-line stderr or stdout text.
+
+    Returns:
+        The last meaningful line, or "" when the text is blank.
+    """
+    # Errors are reported last by the CLI, so the final line is the actionable one.
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    return re.sub(r"^error:\s*", "", lines[-1])
+
+
+def error_message(result, fallback="operation failed"):
+    """Build a toast text from a failed CLI result.
+
+    Args:
+        result: A CliResult.
+        fallback: Text used when the command printed nothing useful.
+
+    Returns:
+        The best available one-line explanation.
+    """
+    # stderr is where the CLI reports problems; stdout is the next best source.
+    message = last_message_line(result.stderr) or last_message_line(result.stdout)
+    return message or f"{fallback} (exit {result.returncode})"
+
+
+def human_size(byte_count):
+    """Format a byte count as B/KB/MB/GB text.
+
+    Args:
+        byte_count: Number or numeric string of bytes.
+
+    Returns:
+        Text such as "63.2 MB", or "?" when the input is not numeric.
+    """
     try:
-        p = subprocess.run([CLI_PATH, *args], capture_output=True, text=True, timeout=timeout)
-        return (p.returncode, p.stdout, p.stderr)
-    except subprocess.TimeoutExpired:
-        return (124, "", "operation timed out")
-    except Exception as exc:  # pragma: no cover
-        return (1, "", str(exc))
-
-
-def human_size(nbytes):
-    try:
-        n = float(nbytes)
+        amount = float(byte_count)
     except (TypeError, ValueError):
         return "?"
     for unit in ("B", "KB", "MB", "GB"):
-        if n < 1024 or unit == "GB":
-            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
-        n /= 1024
-    return f"{n:.1f} GB"
+        # Plain bytes need no decimals; larger units keep one.
+        if amount < 1024 or unit == "GB":
+            return f"{amount:.0f} {unit}" if unit == "B" else f"{amount:.1f} {unit}"
+        amount /= 1024
+    return f"{amount:.1f} GB"
 
 
-# modifier bit names for capturing a shortcut
+def language_title(code):
+    """Build the row title for a language code.
+
+    Args:
+        code: Two-letter language code.
+
+    Returns:
+        Text such as "German (de)"; unknown codes are upper-cased.
+    """
+    name = LANGUAGE_NAMES.get(code)
+    return f"{name} ({code})" if name else code.upper()
+
+
+def build_install_args(backend_flag, variant):
+    """Compose the argument list for `engine install qwen3`.
+
+    Args:
+        backend_flag: "--vulkan", "--cpu" or "" for automatic.
+        variant: "base" or "customvoice".
+
+    Returns:
+        Argument list without the executable name.
+    """
+    args = ["engine", "install", "qwen3"]
+    # Automatic backend selection is the CLI default, so no flag is passed for it.
+    if backend_flag:
+        args.append(backend_flag)
+    # The variant is always explicit so the GUI choice never depends on the CLI default.
+    return args + ["--variant", variant]
+
+
 def accel_to_combo(keyval, state):
-    """Turn a Gdk key event into a Hyprland-style 'MODS, KEY' string, or None."""
-    mods = []
-    if state & Gdk.ModifierType.SUPER_MASK:
-        mods.append("SUPER")
-    if state & Gdk.ModifierType.CONTROL_MASK:
-        mods.append("CTRL")
-    if state & Gdk.ModifierType.ALT_MASK:
-        mods.append("ALT")
-    if state & Gdk.ModifierType.SHIFT_MASK:
-        mods.append("SHIFT")
+    """Turn a Gdk key event into a Hyprland-style "MODS, KEY" string.
+
+    Args:
+        keyval: Gdk key value of the pressed key.
+        state: Gdk modifier mask active during the press.
+
+    Returns:
+        Text such as "SUPER ALT, R", or None for a lone modifier or unnamed key.
+    """
     name = Gdk.keyval_name(keyval)
-    if not name:
+    # Lone modifier presses would produce a shortcut that cannot be triggered.
+    if not name or name in MODIFIER_KEY_NAMES:
         return None
-    # ignore lone modifier presses
-    if name in ("Super_L", "Super_R", "Control_L", "Control_R",
-                "Alt_L", "Alt_R", "Shift_L", "Shift_R", "Meta_L", "Meta_R"):
-        return None
-    return f"{' '.join(mods)}, {name}"
+    modifiers = [label for mask, label in MODIFIER_NAMES if state & mask]
+    return f"{' '.join(modifiers)}, {name}"
 
 
-class TtsWindow(Adw.ApplicationWindow):
-    def __init__(self, app):
-        super().__init__(application=app, title="hyprland-tts")
-        self.set_default_size(600, 720)
-        self._busy = False
+def resolve_cli():
+    """Locate the hyprland-tts executable.
 
-        self.toasts = Adw.ToastOverlay()
-        self.set_content(self.toasts)
+    Args:
+        None.
 
-        toolbar = Adw.ToolbarView()
-        self.toasts.set_child(toolbar)
-        header = Adw.HeaderBar()
-        toolbar.add_top_bar(header)
+    Returns:
+        Absolute path from PATH, else the checkout's bin/hyprland-tts, else None.
+    """
+    found = shutil.which(CLI)
+    if found:
+        return found
+    # A git checkout keeps the CLI next to the gui directory.
+    here = os.path.dirname(os.path.realpath(__file__))
+    candidate = os.path.abspath(os.path.join(here, "..", "bin", "hyprland-tts"))
+    return candidate if os.access(candidate, os.X_OK) else None
 
-        # view switcher: Voices | Shortcuts
-        self.stack = Adw.ViewStack()
-        switcher = Adw.ViewSwitcher(stack=self.stack,
-                                    policy=Adw.ViewSwitcherPolicy.WIDE)
-        header.set_title_widget(switcher)
 
-        self.spinner = Gtk.Spinner()
-        header.pack_end(self.spinner)
-        refresh = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Refresh")
-        refresh.connect("clicked", lambda _b: self.refresh())
-        header.pack_start(refresh)
+# Resolved once at start-up; tests replace it to point at a fake CLI.
+CLI_PATH = resolve_cli()
 
-        toolbar.set_content(self.stack)
 
-        # --- Voices page ---
-        self.voices_page = Gtk.ScrolledWindow(vexpand=True)
-        vclamp = Adw.Clamp(maximum_size=680, margin_top=12, margin_bottom=12,
-                           margin_start=12, margin_end=12)
-        self.voices_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
-        vclamp.set_child(self.voices_box)
-        self.voices_page.set_child(vclamp)
-        self.stack.add_titled_with_icon(self.voices_page, "voices", "Voices",
-                                        "audio-speakers-symbolic")
+def run_cli(args, timeout=None):
+    """Run the CLI to completion and capture its output. Never raises.
 
-        # --- Shortcuts page ---
-        self.keys_page = Gtk.ScrolledWindow(vexpand=True)
-        kclamp = Adw.Clamp(maximum_size=680, margin_top=12, margin_bottom=12,
-                           margin_start=12, margin_end=12)
-        self.keys_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
-        kclamp.set_child(self.keys_box)
-        self.keys_page.set_child(kclamp)
-        self.stack.add_titled_with_icon(self.keys_page, "keys", "Shortcuts",
-                                        "input-keyboard-symbolic")
+    Args:
+        args: Argument list after the executable name.
+        timeout: Seconds before the call is abandoned, or None to wait.
 
-        # header add-url button only makes sense on voices page
-        self.add_url_btn = Gtk.Button(icon_name="list-add-symbolic",
-                                      tooltip_text="Install from custom URL")
-        self.add_url_btn.connect("clicked", self.on_add_url)
-        header.pack_end(self.add_url_btn)
+    Returns:
+        A CliResult; failures map to 127 (no CLI), 124 (timeout) or 1 (other errors).
+    """
+    # Without a CLI every action must fail the same recognisable way.
+    if not CLI_PATH:
+        return CliResult(127, "", "hyprland-tts CLI not found in PATH")
+    try:
+        completed = subprocess.run(
+            [CLI_PATH, *args], capture_output=True, text=True, timeout=timeout, check=False
+        )
+    except subprocess.TimeoutExpired:
+        # A timeout is reported as 124, the conventional exit status of timeout(1).
+        return CliResult(124, "", "operation timed out")
+    except OSError as os_error:
+        return CliResult(1, "", str(os_error))
+    return CliResult(completed.returncode, completed.stdout, completed.stderr)
 
-        GLib.idle_add(self.refresh)
 
-    # -- helpers ---------------------------------------------------------------
-    def toast(self, text):
-        self.toasts.add_toast(Adw.Toast(title=text, timeout=3))
+def _call_once(function, *args):
+    """Run a callable once as a GLib idle handler.
 
-    def set_busy(self, busy):
-        self._busy = busy
-        self.spinner.start() if busy else self.spinner.stop()
+    Args:
+        function: Callable to invoke on the main loop.
+        *args: Arguments for the callable.
 
-    @staticmethod
-    def _clear(box):
-        child = box.get_first_child()
-        while child:
-            nxt = child.get_next_sibling()
-            box.remove(child)
-            child = nxt
+    Returns:
+        False, which removes the idle source after the single call.
+    """
+    function(*args)
+    return False
 
-    # -- data loading ----------------------------------------------------------
-    def refresh(self):
+
+def on_main_thread(function, *args):
+    """Schedule a callable on the GTK main loop from any thread.
+
+    Args:
+        function: Callable to invoke.
+        *args: Arguments for the callable.
+
+    Returns:
+        None.
+    """
+    # GTK widgets may only be touched from the main loop, so worker threads hand results over.
+    GLib.idle_add(_call_once, function, *args)
+
+
+class CliJob:
+    """One asynchronous CLI command whose output lines are streamed to a callback."""
+
+    def __init__(self, args, on_line, on_done):
+        """Prepare, but do not start, the command.
+
+        Args:
+            args: Argument list after the executable name.
+            on_line: Callable taking one output line; runs on the main loop.
+            on_done: Callable taking (returncode, cancelled); runs on the main loop.
+
+        Returns:
+            None.
+        """
+        self._args = args
+        self._on_line = on_line
+        self._on_done = on_done
+        # The process handle exists only between start() and the process exit.
+        self._process = None
+        self._cancelled = False
+
+    @property
+    def running(self):
+        """Tell whether the child process is still alive.
+
+        Returns:
+            True between a successful start and the process exit.
+        """
+        return self._process is not None and self._process.poll() is None
+
+    def start(self):
+        """Spawn the process in its own session and begin streaming.
+
+        Returns:
+            None; a spawn failure is reported through on_done with status 127.
+        """
+        # Without a CLI there is nothing to spawn; report it like a normal failure.
         if not CLI_PATH:
-            return False
-        self._render_voices()
-        self._render_keys()
+            on_main_thread(self._on_line, "hyprland-tts CLI not found in PATH")
+            on_main_thread(self._on_done, 127, False)
+            return
+        try:
+            # A new session makes the whole build tree killable with one killpg call.
+            self._process = subprocess.Popen(
+                [CLI_PATH, *self._args], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL, text=True, errors="replace",
+                start_new_session=True,
+            )
+        except OSError as os_error:
+            on_main_thread(self._on_line, str(os_error))
+            on_main_thread(self._on_done, 127, False)
+            return
+        # The reader thread owns the pipe; the main loop only receives finished lines.
+        threading.Thread(target=self._pump_output, daemon=True).start()
+
+    def _pump_output(self):
+        """Read the merged output line by line, then report the exit status.
+
+        Returns:
+            None; runs on the reader thread.
+        """
+        # The with-block closes the pipe at EOF, so no file descriptor leaks per job.
+        with self._process.stdout as output_pipe:
+            for raw_line in output_pipe:
+                # Build tools colour their output; a TextView would show the raw escapes.
+                line = ANSI_ESCAPE.sub("", raw_line).rstrip()
+                if line:
+                    on_main_thread(self._on_line, line)
+        # wait() reaps the child so no zombie is left behind.
+        return_code = self._process.wait()
+        on_main_thread(self._on_done, return_code, self._cancelled)
+
+    def cancel(self):
+        """Ask the whole process group to stop, escalating to SIGKILL after a grace period.
+
+        Returns:
+            None; safe to call before start or after exit.
+        """
+        self._cancelled = True
+        if self._process is None:
+            return
+        # SIGTERM first lets the CLI clean up its partial downloads.
+        self._signal_group(signal.SIGTERM)
+        # A stubborn child (a compiler mid-job) is force-killed after the grace period.
+        timer = threading.Timer(KILL_GRACE_SECONDS, self._signal_group, (signal.SIGKILL,))
+        timer.daemon = True
+        timer.start()
+
+    def _signal_group(self, signal_number):
+        """Send a signal to the child's process group, ignoring a group that is gone.
+
+        Args:
+            signal_number: The signal to deliver.
+
+        Returns:
+            None.
+        """
+        # A group that already exited is exactly the goal, so that error is ignored.
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(self._process.pid, signal_number)
+
+
+def clear_box(box):
+    """Remove every child widget from a Gtk.Box.
+
+    Args:
+        box: The container to empty.
+
+    Returns:
+        None.
+    """
+    child = box.get_first_child()
+    while child:
+        # The next sibling must be read before the child is detached.
+        following = child.get_next_sibling()
+        box.remove(child)
+        child = following
+
+
+def make_button(label=None, icon=None, tooltip=None, style=("flat",), on_click=None):
+    """Create a vertically centred button.
+
+    Args:
+        label: Button text, or None for an icon-only button.
+        icon: Symbolic icon name, or None.
+        tooltip: Tooltip text, or None.
+        style: CSS classes such as "flat", "suggested-action" or "destructive-action".
+        on_click: Callable without arguments, invoked on click.
+
+    Returns:
+        The configured Gtk.Button.
+    """
+    # Centring keeps the button from stretching to the full row height.
+    button = Gtk.Button(valign=Gtk.Align.CENTER)
+    if label:
+        button.set_label(label)
+    if icon:
+        # Icon-only buttons rely on the tooltip below for their meaning.
+        button.set_icon_name(icon)
+    if tooltip:
+        button.set_tooltip_text(tooltip)
+    # The classes decide whether the button looks flat, suggested or destructive.
+    for css_class in style:
+        button.add_css_class(css_class)
+    # GTK passes the button itself, which the argument-free handlers do not want.
+    if on_click:
+        button.connect("clicked", lambda _button: on_click())
+    return button
+
+
+def make_info_row(title, subtitle=""):
+    """Create a plain, non-interactive row.
+
+    Args:
+        title: Row title.
+        subtitle: Optional second line.
+
+    Returns:
+        An Adw.ActionRow.
+    """
+    # CLI output may contain "&" or "<", so Pango markup parsing is switched off.
+    return Adw.ActionRow(title=title, subtitle=subtitle, use_markup=False)
+
+
+def create_dialog(heading, body):
+    """Create a modal message dialog with the newest API the libadwaita version offers.
+
+    Args:
+        heading: Dialog title.
+        body: Explanatory text.
+
+    Returns:
+        An Adw.AlertDialog, or an Adw.MessageDialog on libadwaita older than 1.5.
+    """
+    # AlertDialog replaced the deprecated MessageDialog in libadwaita 1.5.
+    if hasattr(Adw, "AlertDialog"):
+        return Adw.AlertDialog(heading=heading, body=body)
+    return Adw.MessageDialog(heading=heading, body=body)
+
+
+def present_dialog(dialog, window):
+    """Show a dialog above a window, whichever dialog class it is.
+
+    Args:
+        dialog: Result of create_dialog.
+        window: The parent window.
+
+    Returns:
+        None.
+    """
+    # The two classes disagree on how the parent is attached.
+    if hasattr(Adw, "AlertDialog") and isinstance(dialog, Adw.AlertDialog):
+        dialog.present(window)
+        return
+    dialog.set_transient_for(window)
+    # MessageDialog needs its parent set explicitly before it is shown.
+    dialog.present()
+
+
+def voice_roots(source):
+    """List the directories that may hold the files of a voice.
+
+    Args:
+        source: "user" for the user's own voices, anything else for shipped ones.
+
+    Returns:
+        Candidate directories in lookup order.
+    """
+    if source == "user":
+        data_home = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+        return [os.path.join(data_home, "hyprland-tts", "voices")]
+    # Shipped voices sit next to the script in a checkout and under /usr/share when packaged.
+    here = os.path.dirname(os.path.realpath(__file__))
+    # Same candidates as lib/voices.sh::voice_system_roots plus the packaged location.
+    candidates = [
+        os.environ.get("HYPRLAND_TTS_SYSTEM_VOICES", ""),
+        os.path.join(here, "..", "share", "voices"),
+        os.path.join(here, "..", "share", "hyprland-tts", "voices"),
+        "/usr/share/hyprland-tts/voices",
+    ]
+    return [os.path.abspath(candidate) for candidate in candidates if candidate]
+
+
+def read_voice_document(voice):
+    """Read the attribution or licence text of a voice.
+
+    Shipped voices carry ATTRIBUTION.md; user voices carry the LICENSE written by `voice add`.
+    A shipped pack installed below the user data directory (PREFIX=~/.local) is listed as a
+    user voice, so user voices fall back to ATTRIBUTION.md too.
+
+    Args:
+        voice: A ClonedVoice.
+
+    Returns:
+        The file's text, or None when no readable file exists.
+    """
+    file_names = ("LICENSE", "ATTRIBUTION.md") if voice.source == "user" else ("ATTRIBUTION.md",)
+    for root in voice_roots(voice.source):
+        for file_name in file_names:
+            path = os.path.join(root, voice.name, file_name)
+            try:
+                with open(path, encoding="utf-8", errors="replace") as handle:
+                    # Attribution files are short; the cap only guards against a corrupt giant file.
+                    return handle.read(20000)
+            except OSError:
+                # This root or file does not exist; try the next candidate.
+                continue
+    return None
+
+
+class PageBase(Gtk.ScrolledWindow):
+    """Scrollable, width-clamped page that stacks widgets vertically."""
+
+    def __init__(self, host):
+        """Build the empty page.
+
+        Args:
+            host: The TtsWindow (or a test double) offering toast, run_task, query, confirm.
+
+        Returns:
+            None.
+        """
+        super().__init__(vexpand=True)
+        self.host = host
+        self._refresh_token = 0
+        # The clamp keeps rows readable on wide windows instead of stretching edge to edge.
+        clamp = Adw.Clamp(
+            maximum_size=680, margin_top=12, margin_bottom=12, margin_start=12, margin_end=12
+        )
+        self.content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+        clamp.set_child(self.content)
+        self.set_child(clamp)
+
+    def refresh(self):
+        """Reload the page data from the CLI; subclasses override this.
+
+        Returns:
+            None.
+        """
+
+    def next_token(self):
+        """Start a new refresh generation so older, slower results can be discarded.
+
+        Returns:
+            The token the caller must check with is_current.
+        """
+        self._refresh_token += 1
+        return self._refresh_token
+
+    def is_current(self, token):
+        """Tell whether a refresh result is still the newest one.
+
+        Args:
+            token: Value returned by next_token when the refresh started.
+
+        Returns:
+            True when no newer refresh has started since.
+        """
+        return token == self._refresh_token
+
+    def has_running_job(self):
+        """Tell whether a long-running command belongs to this page.
+
+        Returns:
+            False by default; pages with an install job override it.
+        """
         return False
 
-    # -- Voices ----------------------------------------------------------------
-    def _render_voices(self):
-        self._clear(self.voices_box)
-        rc_i, out_i, err_i = run_cli(["model", "list", "--porcelain"], timeout=10)
-        rc_c, out_c, _ = run_cli(["model", "catalog", "--porcelain"], timeout=10)
-        installed = self._parse_installed(out_i) if rc_i == 0 else []
-        catalog = self._parse_catalog(out_c) if rc_c == 0 else []
+    def cancel_jobs(self):
+        """Cancel this page's long-running command, if any.
 
-        fb_group = Adw.PreferencesGroup(
-            title="Fallback voice",
-            description="Used when the language of the selected text can't be detected, "
-                        "instead of just reusing the last voice you spoke with.")
-        self.voices_box.append(fb_group)
-        fb = next((v for v in installed if v["fallback"]), None)
-        if fb:
-            fb_row = Adw.ActionRow(title=fb["name"], subtitle=fb["lang"].upper())
-            clear_btn = Gtk.Button(label="Clear", valign=Gtk.Align.CENTER)
-            clear_btn.add_css_class("flat")
-            clear_btn.connect("clicked", lambda _b: self._worker(
-                ["model", "fallback", "--clear"], "Fallback voice cleared", timeout=10))
-            fb_row.add_suffix(clear_btn)
-        else:
-            fb_row = Adw.ActionRow(title="Not set",
-                                   subtitle="Falls back to the last voice you used")
-        fb_group.add(fb_row)
+        Returns:
+            None.
+        """
 
-        inst_group = Adw.PreferencesGroup(title="Installed voices",
-                                          description="Set a per-language default, or the fallback voice above, or remove.")
-        self.voices_box.append(inst_group)
-        if not installed:
-            inst_group.add(Adw.ActionRow(title="No voices installed yet",
-                                         subtitle="Install one from the list below."))
-        for v in installed:
-            inst_group.add(self._installed_row(v))
 
-        cat_group = Adw.PreferencesGroup(title="Available to download",
-                                         description="Curated neural voices (downloaded locally).")
-        self.voices_box.append(cat_group)
-        for c in catalog:
-            cat_group.add(self._catalog_row(c))
-        if rc_i != 0:
-            self.toast(err_i.strip() or "could not list installed voices")
+class JobPanel(Gtk.Box):
+    """Progress area for one long command: status line, scrolling log and Cancel button."""
+
+    def __init__(self, on_finished):
+        """Build the (initially hidden) panel.
+
+        Args:
+            on_finished: Callable taking (returncode, cancelled, last_line) when the job ends.
+
+        Returns:
+            None.
+        """
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self._on_finished = on_finished
+        self._job = None
+        # The last line doubles as the error text when the job fails.
+        self._last_line = ""
+        # Hidden until the first job so an idle page stays compact.
+        self.set_visible(False)
+        self._build_status_row()
+        self._build_log_view()
+
+    def _build_status_row(self):
+        """Create the spinner, the latest-line label and the Cancel button.
+
+        Returns:
+            None.
+        """
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self._spinner = Gtk.Spinner()
+        # The label shows only the newest line; the full history sits in the log below.
+        self._status_label = Gtk.Label(
+            label="", xalign=0, hexpand=True, ellipsize=Pango.EllipsizeMode.END
+        )
+        self._cancel_button = make_button(
+            label="Cancel", style=("destructive-action",), on_click=self.cancel
+        )
+        for widget in (self._spinner, self._status_label, self._cancel_button):
+            row.append(widget)
+        # The strip becomes the panel's first row; the log view follows below it.
+        self.append(row)
+
+    def _build_log_view(self):
+        """Create the read-only monospace log inside a scrolled window.
+
+        Returns:
+            None.
+        """
+        self._log_view = Gtk.TextView(
+            editable=False, cursor_visible=False, monospace=True,
+            wrap_mode=Gtk.WrapMode.WORD_CHAR, left_margin=8, right_margin=8,
+            top_margin=6, bottom_margin=6,
+        )
+        scroller = Gtk.ScrolledWindow(min_content_height=200, max_content_height=320)
+        scroller.set_child(self._log_view)
+        # The frame style visually groups the log with the status row above it.
+        scroller.add_css_class("card")
+        self.append(scroller)
+
+    @property
+    def running(self):
+        """Tell whether a job is currently running.
+
+        Returns:
+            True while the command has not finished.
+        """
+        return self._job is not None and self._job.running
+
+    def log_text(self):
+        """Return the whole log as one string.
+
+        Returns:
+            The text currently in the log view.
+        """
+        buffer = self._log_view.get_buffer()
+        return buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), False)
+
+    def start(self, args):
+        """Clear the log and launch a command.
+
+        Args:
+            args: Argument list after the executable name.
+
+        Returns:
+            True when started; False when a job is already running.
+        """
+        if self.running:
+            return False
+        self._log_view.get_buffer().set_text("")
+        # Forget the previous run's last line so an old error never shows up for a new job.
+        self._last_line = ""
+        # Show the panel and the busy indicators before the first output arrives.
+        self.set_visible(True)
+        self._spinner.start()
+        self._cancel_button.set_visible(True)
+        self._status_label.set_text("Starting…")
+        # Output lines and the exit status come back through these callbacks on the main loop.
+        self._job = CliJob(args, self._append_line, self._finish)
+        self._job.start()
+        return True
+
+    def cancel(self):
+        """Cancel the running job and say so in the status line.
+
+        Returns:
+            None.
+        """
+        if self.running:
+            self._status_label.set_text("Cancelling…")
+            self._job.cancel()
+
+    def _append_line(self, line):
+        """Add one output line to the log and the status label.
+
+        Args:
+            line: Text without trailing newline.
+
+        Returns:
+            None.
+        """
+        buffer = self._log_view.get_buffer()
+        buffer.insert(buffer.get_end_iter(), line + "\n")
+        self._trim_log(buffer)
+        # Keep the newest output visible without the user scrolling.
+        end_mark = buffer.create_mark(None, buffer.get_end_iter(), False)
+        self._log_view.scroll_to_mark(end_mark, 0.0, False, 0.0, 0.0)
+        buffer.delete_mark(end_mark)
+        self._last_line = line
+        # The one-line status shows progress without the user reading the whole log.
+        self._status_label.set_text(line)
 
     @staticmethod
-    def _parse_installed(text):
-        rows = []
-        for line in text.splitlines():
-            p = line.split("\t")
-            if len(p) == 7:
-                rows.append({"id": p[0], "lang": p[1], "name": p[2], "size": p[3],
-                             "default": p[4] == "1", "last": p[5] == "1",
-                             "fallback": p[6] == "1"})
-        return rows
+    def _trim_log(buffer):
+        """Drop the oldest lines once the log exceeds MAX_LOG_LINES.
 
-    @staticmethod
-    def _parse_catalog(text):
-        rows = []
-        for line in text.splitlines():
-            p = line.split("\t")
-            if len(p) == 6:
-                rows.append({"key": p[0], "lang": p[1], "model": p[2], "quality": p[3],
-                             "installed": p[4] == "1", "label": p[5]})
-        return rows
+        Args:
+            buffer: The log's Gtk.TextBuffer.
 
-    def _installed_row(self, v):
-        bits = [v["lang"].upper(), human_size(v["size"])]
-        if v["default"]:
-            bits.append("default")
-        if v["fallback"]:
-            bits.append("fallback")
-        if v["last"]:
-            bits.append("last used")
-        row = Adw.ActionRow(title=v["name"], subtitle=" · ".join(bits))
-        if not v["default"]:
-            star = Gtk.Button(icon_name="starred-symbolic", valign=Gtk.Align.CENTER,
-                              tooltip_text=f"Make default for {v['lang'].upper()}")
-            star.add_css_class("flat")
-            star.connect("clicked", lambda _b, i=v["id"]: self.on_set_default(i))
-            row.add_suffix(star)
-        if not v["fallback"]:
-            fb_btn = Gtk.Button(label="Fallback", valign=Gtk.Align.CENTER,
-                                tooltip_text="Use when the language isn't detected")
-            fb_btn.add_css_class("flat")
-            fb_btn.connect("clicked", lambda _b, i=v["id"]: self.on_set_fallback(i))
-            row.add_suffix(fb_btn)
-        trash = Gtk.Button(icon_name="user-trash-symbolic", valign=Gtk.Align.CENTER,
-                           tooltip_text="Remove")
-        trash.add_css_class("flat")
-        trash.add_css_class("destructive-action")
-        trash.connect("clicked", lambda _b, i=v["id"]: self.on_remove(i))
-        row.add_suffix(trash)
-        return row
+        Returns:
+            None.
+        """
+        excess = buffer.get_line_count() - MAX_LOG_LINES
+        if excess > 0:
+            # Deleting from the very start to the start of line `excess` removes whole lines.
+            buffer.delete(buffer.get_start_iter(), buffer.get_iter_at_line(excess)[1])
 
-    def _catalog_row(self, c):
-        row = Adw.ActionRow(title=c["label"],
-                            subtitle=f"{c['lang'].upper()} · {c['quality']} · {c['key']}")
-        if c["installed"]:
-            ok = Gtk.Image.new_from_icon_name("emblem-ok-symbolic")
-            ok.set_tooltip_text("Installed")
-            row.add_suffix(ok)
+    def _finish(self, return_code, cancelled):
+        """Update the status line and notify the owner when the job ends.
+
+        Args:
+            return_code: Process exit status.
+            cancelled: True when the user asked to cancel.
+
+        Returns:
+            None.
+        """
+        self._spinner.stop()
+        self._cancel_button.set_visible(False)
+        # The wording distinguishes the three ways a job can end.
+        if cancelled:
+            self._status_label.set_text("Cancelled")
+        elif return_code == 0:
+            self._status_label.set_text("Finished successfully")
         else:
-            btn = Gtk.Button(label="Install", valign=Gtk.Align.CENTER)
-            btn.add_css_class("suggested-action")
-            btn.connect("clicked", lambda _b, k=c["key"]: self.on_install(k))
-            row.add_suffix(btn)
-        return row
+            # Failures show the last output line, which usually names the cause.
+            self._status_label.set_text(f"Failed (exit {return_code}): {self._last_line}")
+        self._on_finished(return_code, cancelled, self._last_line)
 
-    # -- Shortcuts -------------------------------------------------------------
-    def _render_keys(self):
-        self._clear(self.keys_box)
-        rc, out, err = run_cli(["keybind", "list", "--porcelain"], timeout=10)
-        group = Adw.PreferencesGroup(
-            title="Keyboard shortcuts",
-            description="Click a shortcut to rebind it. New bindings are checked "
-                        "against your other Hyprland shortcuts first.")
-        self.keys_box.append(group)
-        if rc != 0:
-            group.add(Adw.ActionRow(title="Could not read shortcuts",
-                                    subtitle=err.strip() or "keybind list failed"))
-            return
-        for line in out.splitlines():
-            p = line.split("\t")
-            if len(p) != 3:
-                continue
-            action, label, combo = p
-            row = Adw.ActionRow(title=label, subtitle=action)
-            btn = Gtk.Button(label=combo or "unset", valign=Gtk.Align.CENTER)
-            btn.add_css_class("flat")
-            btn.connect("clicked", lambda _b, a=action, lb=label: self.on_rebind(a, lb))
-            row.add_suffix(btn)
-            row.set_activatable_widget(btn)
+
+class EnginePage(PageBase):
+    """Engine status, engine choice, Qwen3-TTS install/remove and worker control."""
+
+    def __init__(self, host):
+        """Build every group once; refresh() only updates their contents.
+
+        Args:
+            host: The TtsWindow (or a test double).
+
+        Returns:
+            None.
+        """
+        super().__init__(host)
+        self._status = EngineStatus()
+        self._populating = False
+        # Groups are built top to bottom in the order they appear on screen.
+        self._build_status_group()
+        self._build_choice_group()
+        self._build_install_group()
+        self._build_worker_group()
+
+    def _build_status_group(self):
+        """Create the read-only status rows and the worker start/stop buttons.
+
+        Returns:
+            None.
+        """
+        group = Adw.PreferencesGroup(title="Status")
+        self.active_row = make_info_row("Active engine")
+        self.qwen3_row = make_info_row("Qwen3-TTS")
+        # The worker row gets its own Start and Stop buttons below.
+        self.worker_row = make_info_row("Engine worker")
+        self.languages_row = make_info_row("Languages")
+        # Start and stop live on the worker row because that is what they act on.
+        self.start_button = make_button(label="Start", on_click=self._on_start_worker)
+        self.stop_button = make_button(label="Stop", on_click=self._on_stop_worker)
+        self.worker_row.add_suffix(self.start_button)
+        self.worker_row.add_suffix(self.stop_button)
+        # Rows are added in reading order: engine, Qwen3, worker, languages.
+        for row in (self.active_row, self.qwen3_row, self.worker_row, self.languages_row):
             group.add(row)
+        self.content.append(group)
 
-        reset = Adw.PreferencesGroup()
-        self.keys_box.append(reset)
-        rrow = Adw.ActionRow(title="Reset all shortcuts",
-                             subtitle="Restore the default key bindings")
-        rbtn = Gtk.Button(label="Reset", valign=Gtk.Align.CENTER)
-        rbtn.connect("clicked", lambda _b: self._worker(["keybind", "reset"],
-                                                        "Shortcuts reset", timeout=10))
-        rrow.add_suffix(rbtn)
-        reset.add(rrow)
+    def _build_choice_group(self):
+        """Create the auto / Qwen3 / Piper selector.
 
-    def on_rebind(self, action, label):
-        dialog = Adw.MessageDialog(
-            transient_for=self, heading=f"Rebind “{label}”",
-            body="Press the new key combination…")
-        capture = Gtk.Label(label="Waiting for keys…")
-        capture.add_css_class("title-2")
-        capture.set_margin_top(12)
-        capture.set_margin_bottom(12)
-        dialog.set_extra_child(capture)
-        state = {"combo": None}
+        Returns:
+            None.
+        """
+        group = Adw.PreferencesGroup(
+            title="Engine",
+            description="Which engine reads your text. Piper stays installed as a light fallback.",
+        )
+        titles = [title for _value, title, _hint in ENGINE_CHOICES]
+        self.engine_combo = Adw.ComboRow(title="Use", model=Gtk.StringList.new(titles))
+        # Connected after construction; _select_without_signal guards programmatic updates.
+        self.engine_combo.connect("notify::selected", self._on_engine_chosen)
+        group.add(self.engine_combo)
+        self.content.append(group)
 
-        controller = Gtk.EventControllerKey()
+    def _build_install_group(self):
+        """Create the install options, buttons and the progress panel.
 
-        def on_key(_c, keyval, _code, mods):
-            combo = accel_to_combo(keyval, mods)
-            if combo:
-                state["combo"] = combo
-                capture.set_text(combo)
-                dialog.set_response_enabled("apply", True)
-            return True
+        Returns:
+            None.
+        """
+        group = Adw.PreferencesGroup(
+            title="Install Qwen3-TTS",
+            description="Builds the engine and downloads about 2.2 GB of models into your user "
+            "data directory (roughly 7 minutes). Nothing runs as root.",
+        )
+        self.backend_combo = Adw.ComboRow(
+            title="Compute backend",
+            model=Gtk.StringList.new([title for _flag, title in BACKEND_CHOICES]),
+        )
+        self.variant_combo = Adw.ComboRow(
+            title="Model",
+            model=Gtk.StringList.new([title for _value, title in VARIANT_CHOICES]),
+        )
+        # Install is the primary action of this group, hence the suggested style.
+        self.install_button = make_button(
+            label="Install", style=("suggested-action",), on_click=self._on_install_clicked
+        )
+        self.remove_button = make_button(
+            label="Remove", style=("destructive-action",), on_click=self._on_remove_clicked
+        )
+        # Switching only changes which installed model is loaded, so it needs no download.
+        self.switch_button = make_button(
+            label="Switch model", tooltip="Use the selected model without reinstalling",
+            on_click=self._on_switch_clicked,
+        )
+        # The switch button must follow the combo, not just the status refresh.
+        self.variant_combo.connect("notify::selected", lambda *_args: self._update_button_state())
+        # Install and remove share one row so both engine-file actions sit together.
+        action_row = make_info_row("Engine files", "Install, switch model or remove")
+        action_row.add_suffix(self.remove_button)
+        action_row.add_suffix(self.switch_button)
+        action_row.add_suffix(self.install_button)
+        for row in (self.backend_combo, self.variant_combo, action_row):
+            # Options come before the action row so the user decides first, then acts.
+            group.add(row)
+        self.install_panel = JobPanel(self._on_install_finished)
+        self.content.append(group)
+        self.content.append(self.install_panel)
 
-        controller.connect("key-pressed", on_key)
-        dialog.add_controller(controller)
+    def _build_worker_group(self):
+        """Create the idle-timeout setting.
 
-        dialog.add_response("cancel", "Cancel")
-        dialog.add_response("apply", "Apply")
-        dialog.set_response_enabled("apply", False)
-        dialog.set_response_appearance("apply", Adw.ResponseAppearance.SUGGESTED)
-        dialog.connect("response", self._on_rebind_response, action, state)
-        dialog.present()
+        Returns:
+            None.
+        """
+        group = Adw.PreferencesGroup(
+            title="Worker",
+            description="The engine worker keeps the model in memory (about 1.2 GB) and exits "
+            "on its own after this many idle minutes.",
+        )
+        low, high = IDLE_MINUTES_RANGE
+        self.idle_row = Adw.SpinRow.new_with_range(low, high, 1)
+        # The range constructor takes no title, so it is set separately.
+        self.idle_row.set_title("Idle timeout (minutes)")
+        self.idle_row.add_suffix(make_button(label="Apply", on_click=self._on_apply_idle))
+        group.add(self.idle_row)
+        self.content.append(group)
 
-    def _on_rebind_response(self, _dialog, response, action, state):
-        if response != "apply" or not state["combo"]:
+    def refresh(self):
+        """Query the engine status and update the page.
+
+        Returns:
+            None.
+        """
+        token = self.next_token()
+        self.host.query(
+            [["engine", "status", "--porcelain"]],
+            lambda results: self._on_status_result(token, results[0]),
+        )
+
+    def _on_status_result(self, token, result):
+        """Apply a status query result unless a newer refresh superseded it.
+
+        Args:
+            token: Refresh generation the query belonged to.
+            result: The CliResult of `engine status --porcelain`.
+
+        Returns:
+            None.
+        """
+        if not self.is_current(token):
             return
-        combo = state["combo"]
-        # check for conflicts first (CLI queries hyprctl binds)
-        rc, out, _ = run_cli(["keybind", "check", combo], timeout=10)
-        conflict = out.strip()
-        if conflict:
-            self._confirm_conflict(action, combo, conflict)
+        # A failed query leaves the defaults in place and tells the user why.
+        if result.returncode != 0:
+            self.host.toast(error_message(result, "could not read the engine status"))
+        self.apply_status(parse_engine_status(result.stdout if result.returncode == 0 else ""))
+
+    def apply_status(self, status):
+        """Show a parsed status in every row and enable the matching buttons.
+
+        Args:
+            status: An EngineStatus.
+
+        Returns:
+            None.
+        """
+        self._status = status
+        self.active_row.set_subtitle(describe_active_engine(status))
+        self.qwen3_row.set_subtitle(describe_qwen3(status))
+        # The worker row explains where the model's memory went, or that nothing is loaded.
+        self.worker_row.set_subtitle(describe_worker(status))
+        languages = status.languages or status.piper_languages
+        self.languages_row.set_subtitle(", ".join(languages) if languages else "None detected")
+        self._select_without_signal(status)
+        # Buttons follow the state that was just displayed.
+        self._update_button_state()
+
+    def _select_without_signal(self, status):
+        """Move the combos and the spin row to the status values without running handlers.
+
+        Args:
+            status: An EngineStatus.
+
+        Returns:
+            None.
+        """
+        # The guard stops these programmatic changes from being treated as user choices.
+        self._populating = True
+        values = [value for value, _title, _hint in ENGINE_CHOICES]
+        self.engine_combo.set_selected(values.index(status.selected) if status.selected in values
+                                       else 0)
+        self._show_engine_hint()
+        # Only variants the combo knows can be preselected.
+        variants = [value for value, _title in VARIANT_CHOICES]
+        # Only a variant the combo knows can be preselected; otherwise the choice stays.
+        if status.qwen3_variant in variants:
+            self.variant_combo.set_selected(variants.index(status.qwen3_variant))
+        low, high = IDLE_MINUTES_RANGE
+        self.idle_row.set_value(min(max(status.idle_minutes, low), high))
+        # From here on, changes are the user's again.
+        self._populating = False
+
+    def _show_engine_hint(self):
+        """Show the one-line explanation of the selected engine under the combo.
+
+        Returns:
+            None.
+        """
+        # The hint lets the user compare the three engines without opening a manual.
+        self.engine_combo.set_subtitle(ENGINE_CHOICES[self.engine_combo.get_selected()][2])
+
+    def _update_button_state(self):
+        """Enable only the buttons that make sense for the current state.
+
+        Returns:
+            None.
+        """
+        installing = self.install_panel.running
+        worker_up = self._status.worker in ("running", "starting")
+        # While an install runs, engine files and the worker must not be touched.
+        self.install_button.set_sensitive(not installing)
+        self.remove_button.set_sensitive(self._status.qwen3_installed and not installing)
+        # Switching makes sense only when the chosen model differs from the loaded one.
+        chosen_variant = VARIANT_CHOICES[self.variant_combo.get_selected()][0]
+        self.switch_button.set_sensitive(
+            self._status.qwen3_installed and not installing
+            and chosen_variant != self._status.qwen3_variant
+        )
+        self.start_button.set_sensitive(
+            self._status.qwen3_installed and not worker_up and not installing
+        )
+        self.stop_button.set_sensitive(worker_up and not installing)
+
+    def _on_engine_chosen(self, combo, _param):
+        """Persist the engine choice the user just made.
+
+        Args:
+            combo: The Adw.ComboRow.
+            _param: Unused GObject property spec.
+
+        Returns:
+            None.
+        """
+        if self._populating:
+            return
+        value, title, _hint = ENGINE_CHOICES[combo.get_selected()]
+        # Keep the explanation under the combo in sync with the new choice.
+        self._show_engine_hint()
+        # Persist the choice; the refresh after the task redraws the status rows.
+        self.host.run_task(["engine", "use", value], f"Engine: {title}")
+
+    def _on_install_clicked(self):
+        """Start the install job with the backend and model the user picked.
+
+        Returns:
+            None.
+        """
+        backend_flag = BACKEND_CHOICES[self.backend_combo.get_selected()][0]
+        variant = VARIANT_CHOICES[self.variant_combo.get_selected()][0]
+        if self.install_panel.start(build_install_args(backend_flag, variant)):
+            # Lock Install and Remove at once; the job itself runs on its own thread.
+            self._update_button_state()
+
+    def _on_switch_clicked(self):
+        """Switch the active Qwen3 model without reinstalling.
+
+        Returns:
+            None.
+        """
+        variant = VARIANT_CHOICES[self.variant_combo.get_selected()][0]
+        self.host.run_task(["engine", "variant", variant], f"Model: {variant}",
+                           WORKER_START_TIMEOUT)
+
+    def _on_install_finished(self, return_code, cancelled, last_line):
+        """Report the install outcome and reload the status.
+
+        Args:
+            return_code: Exit status of the install command.
+            cancelled: True when the user cancelled it.
+            last_line: Last output line, used as the error text.
+
+        Returns:
+            None.
+        """
+        # Unlock the buttons right away instead of waiting for the status query to return.
+        self._update_button_state()
+        # The outcome is shown as a toast as well, in case the user switched pages.
+        if cancelled:
+            self.host.toast("Installation cancelled")
+        elif return_code == 0:
+            self.host.toast("Qwen3-TTS installed")
         else:
-            self._worker(["keybind", "set", action, combo], f"Bound to {combo}", timeout=10)
+            # The last output line usually names the failing step.
+            self.host.toast(last_line or f"Installation failed (exit {return_code})")
+        self.host.refresh()
 
-    def _confirm_conflict(self, action, combo, conflict):
-        dialog = Adw.MessageDialog(
-            transient_for=self, heading="Shortcut already in use",
-            body=f"“{combo}” is already bound to:\n{conflict}\n\nBind it anyway?")
-        dialog.add_response("cancel", "Cancel")
-        dialog.add_response("force", "Bind anyway")
-        dialog.set_response_appearance("force", Adw.ResponseAppearance.DESTRUCTIVE)
-        dialog.connect(
-            "response",
-            lambda _d, r: r == "force" and self._worker(
-                ["keybind", "set", action, combo, "--force"],
-                f"Bound to {combo}", timeout=10))
-        dialog.present()
+    def _on_remove_clicked(self):
+        """Ask for confirmation before deleting the engine files.
 
-    # -- actions ---------------------------------------------------------------
-    def _worker(self, args, ok_msg, timeout=None):
-        if self._busy:
-            self.toast("Please wait for the current operation to finish.")
+        Returns:
+            None.
+        """
+        self.host.confirm(
+            "Remove Qwen3-TTS?",
+            "The engine and its models (about 2.2 GB) are deleted. Your cloned voices and "
+            "settings are kept.",
+            "Remove",
+            lambda: self.host.run_task(["engine", "remove", "qwen3"], "Qwen3-TTS removed"),
+        )
+
+    def _on_start_worker(self):
+        """Warm the engine worker now.
+
+        Returns:
+            None.
+        """
+        self.host.run_task(["engine", "start"], "Worker started", WORKER_START_TIMEOUT)
+
+    def _on_stop_worker(self):
+        """Stop the engine worker and free its memory.
+
+        Returns:
+            None.
+        """
+        self.host.run_task(["engine", "stop"], "Worker stopped")
+
+    def _on_apply_idle(self):
+        """Store the idle timeout shown in the spin row.
+
+        Returns:
+            None.
+        """
+        minutes = int(self.idle_row.get_value())
+        self.host.run_task(
+            ["engine", "config", "idle", str(minutes)], f"Worker exits after {minutes} min idle"
+        )
+
+    def has_running_job(self):
+        """Tell whether the install is running.
+
+        Returns:
+            True while `engine install` runs.
+        """
+        return self.install_panel.running
+
+    def cancel_jobs(self):
+        """Cancel the running install.
+
+        Returns:
+            None.
+        """
+        self.install_panel.cancel()
+
+
+class AddVoiceForm(Gtk.Box):
+    """Form for cloning a voice: name, reference WAV, transcript, licence and consent."""
+
+    def __init__(self, on_change):
+        """Build the form.
+
+        Args:
+            on_change: Callable without arguments, invoked whenever any field changes.
+
+        Returns:
+            None.
+        """
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self._on_change = on_change
+        self._wav_path = ""
+        # Paths stay empty until the user picks files; is_valid() checks them.
+        self._licence_path = ""
+        self.name_entry = Gtk.Entry(placeholder_text="Voice name, e.g. de-anna", max_length=40)
+        self.name_entry.connect("changed", lambda _entry: self._on_change())
+        self.wav_label = self._path_label("No file chosen")
+        # The licence is optional; the consent note covers the case without one.
+        self.licence_label = self._path_label("None")
+        self._build_transcript_view()
+        self.consent_check = Gtk.CheckButton(
+            label="I have the right to use this recording to create a synthetic voice "
+            "(my own voice, a licence that allows it, or the speaker's consent)."
+        )
+        self.consent_check.connect("toggled", lambda _check: self._on_change())
+        # Layout comes last, once all widgets exist.
+        self._assemble()
+
+    @staticmethod
+    def _path_label(text):
+        """Create the label that shows a chosen file name.
+
+        Args:
+            text: Initial text.
+
+        Returns:
+            A Gtk.Label that shortens long names in the middle.
+        """
+        return Gtk.Label(label=text, xalign=0, hexpand=True, ellipsize=Pango.EllipsizeMode.MIDDLE)
+
+    def _build_transcript_view(self):
+        """Create the transcript text box.
+
+        Returns:
+            None.
+        """
+        self.transcript_view = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR, left_margin=6,
+                                            right_margin=6, top_margin=6, bottom_margin=6)
+        self.transcript_view.get_buffer().connect("changed", lambda _buffer: self._on_change())
+
+    def _assemble(self):
+        """Lay the fields out top to bottom with short captions.
+
+        Returns:
+            None.
+        """
+        self.append(Gtk.Label(label="Name", xalign=0))
+        self.append(self.name_entry)
+        self.append(self._file_row("Reference recording (WAV, 6-12 s)", self.wav_label,
+                                   self._choose_wav))
+        # The cloning model aligns this text with the audio, so it must match the recording.
+        self.append(Gtk.Label(label="Exact words spoken in the recording", xalign=0))
+        scroller = Gtk.ScrolledWindow(min_content_height=80, max_content_height=120)
+        scroller.set_child(self.transcript_view)
+        scroller.add_css_class("card")
+        # The scroller keeps long transcripts from growing the dialog.
+        self.append(scroller)
+        self.append(self._file_row("Licence file (optional)", self.licence_label,
+                                   self._choose_licence))
+        self.append(self.consent_check)
+
+    @staticmethod
+    def _file_row(caption, path_label, on_choose):
+        """Create a caption, the chosen path and a Choose button in one row.
+
+        Args:
+            caption: Text above the row.
+            path_label: Label that shows the chosen file.
+            on_choose: Callable without arguments that opens the file chooser.
+
+        Returns:
+            A vertical Gtk.Box.
+        """
+        column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        column.append(Gtk.Label(label=caption, xalign=0))
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        # The chosen file name sits left of its Choose button.
+        row.append(path_label)
+        row.append(make_button(label="Choose…", style=(), on_click=on_choose))
+        column.append(row)
+        return column
+
+    def _choose_wav(self):
+        """Open a file chooser for the reference recording.
+
+        Returns:
+            None.
+        """
+        self._pick_file("Choose the reference recording", self.set_wav_path)
+
+    def _choose_licence(self):
+        """Open a file chooser for the optional licence file.
+
+        Returns:
+            None.
+        """
+        self._pick_file("Choose the licence file", self.set_licence_path)
+
+    def _pick_file(self, title, apply_path):
+        """Show a Gtk.FileDialog and pass the chosen path on.
+
+        Args:
+            title: Dialog title.
+            apply_path: Callable taking the chosen path.
+
+        Returns:
+            None.
+        """
+        dialog = Gtk.FileDialog(title=title)
+        dialog.open(self.get_root(), None, functools.partial(self._on_file_chosen, apply_path))
+
+    @staticmethod
+    def _on_file_chosen(apply_path, dialog, result):
+        """Finish a file dialog and hand the path over.
+
+        Args:
+            apply_path: Callable taking the chosen path.
+            dialog: The Gtk.FileDialog.
+            result: The Gio.AsyncResult.
+
+        Returns:
+            None.
+        """
+        try:
+            chosen = dialog.open_finish(result)
+        except GLib.Error:
+            # Dismissing the dialog is not an error worth reporting.
             return
-        self.set_busy(True)
+        apply_path(chosen.get_path() or "")
 
-        def task():
-            rc, _out, err = run_cli(args, timeout=timeout)
+    def set_wav_path(self, path):
+        """Remember the reference recording and show its file name.
 
-            def done():
-                self.set_busy(False)
-                self.toast(ok_msg if rc == 0 else
-                           (err.strip().splitlines()[-1] if err.strip() else "operation failed"))
-                self.refresh()
-                return False
-            GLib.idle_add(done)
-        threading.Thread(target=task, daemon=True).start()
+        Args:
+            path: Absolute path of the WAV file.
+
+        Returns:
+            None.
+        """
+        self._wav_path = path
+        self.wav_label.set_text(os.path.basename(path) or "No file chosen")
+        self._on_change()
+
+    def set_licence_path(self, path):
+        """Remember the optional licence file and show its file name.
+
+        Args:
+            path: Absolute path of the licence file.
+
+        Returns:
+            None.
+        """
+        self._licence_path = path
+        self.licence_label.set_text(os.path.basename(path) or "None")
+        self._on_change()
+
+    def transcript_text(self):
+        """Return the transcript the user typed.
+
+        Returns:
+            The text with surrounding whitespace removed.
+        """
+        buffer = self.transcript_view.get_buffer()
+        return buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), False).strip()
+
+    def is_valid(self):
+        """Tell whether everything required is filled in and the consent box is ticked.
+
+        Returns:
+            True when the voice may be added.
+        """
+        name_ok = bool(VOICE_NAME_PATTERN.match(self.name_entry.get_text()))
+        # Every requirement must hold; the consent box is mandatory by design.
+        return (
+            name_ok
+            and bool(self._wav_path)
+            and bool(self.transcript_text())
+            and self.consent_check.get_active()
+        )
+
+    def values(self):
+        """Collect the entered values.
+
+        Returns:
+            Dict with name, wav, transcript and licence (empty string when none).
+        """
+        return {
+            "name": self.name_entry.get_text(),
+            "wav": self._wav_path,
+            "transcript": self.transcript_text(),
+            "licence": self._licence_path,
+        }
+
+
+def write_private_file(text, suffix):
+    """Write text to a new 0600 temporary file.
+
+    Args:
+        text: File content.
+        suffix: File name suffix, e.g. ".txt".
+
+    Returns:
+        Path of the file; the caller deletes it.
+    """
+    # mkstemp creates the file with mode 0600, which suits a user's private transcript.
+    descriptor, path = tempfile.mkstemp(prefix="hyprland-tts-", suffix=suffix)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(text.rstrip("\n") + "\n")
+    return path
+
+
+def build_voice_add_args(values, transcript_path, licence_path):
+    """Compose the argument list for `voice add`.
+
+    Args:
+        values: Result of AddVoiceForm.values().
+        transcript_path: File that holds the transcript text.
+        licence_path: File that holds the licence or consent note.
+
+    Returns:
+        Argument list without the executable name.
+    """
+    return ["voice", "add", values["name"], values["wav"], transcript_path,
+            "--license", licence_path]
+
+
+class NeuralVoicesSection(Gtk.Box):
+    """Per-language voice choice for the neural engine plus cloned-voice management."""
+
+    def __init__(self, host):
+        """Create the empty section.
+
+        Args:
+            host: The TtsWindow (or a test double).
+
+        Returns:
+            None.
+        """
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+        self.host = host
+
+    def render(self, status, voice_result):
+        """Rebuild the groups from fresh CLI data.
+
+        Args:
+            status: An EngineStatus.
+            voice_result: CliResult of `voice list --porcelain`.
+
+        Returns:
+            None.
+        """
+        clear_box(self)
+        # A failed listing is shown in place of the groups instead of leaving a blank page.
+        if voice_result.returncode != 0:
+            group = Adw.PreferencesGroup(title="Neural voices")
+            group.add(make_info_row("Could not list voices", error_message(voice_result)))
+            self.append(group)
+            # A broken listing ends the render: the groups below need its data.
+            return
+        catalog = parse_voice_list(voice_result.stdout)
+        # Choices can be prepared before the install, but the user should know they are idle.
+        if status.known and not status.qwen3_installed:
+            self.append(self._not_installed_group())
+        self.append(self._language_group(status, catalog))
+        self.append(self._cloned_group(catalog))
+
+    @staticmethod
+    def _not_installed_group():
+        """Create the hint shown while the neural engine is missing.
+
+        Returns:
+            An Adw.PreferencesGroup with one explanatory row.
+        """
+        group = Adw.PreferencesGroup()
+        group.add(make_info_row(
+            "Qwen3-TTS is not installed",
+            "Your choices are saved now and apply once you install it on the Engine tab.",
+        ))
+        return group
+
+    def _language_group(self, status, catalog):
+        """Create one voice selector per language.
+
+        Args:
+            status: An EngineStatus.
+            catalog: A VoiceCatalog.
+
+        Returns:
+            An Adw.PreferencesGroup.
+        """
+        group = Adw.PreferencesGroup(
+            title="Neural voice per language",
+            description="Used by Qwen3-TTS. Native cloned voices need the Base model; preset "
+            "speakers need the CustomVoice model (Engine tab).",
+        )
+        choices = voices_for_variant(catalog, status.qwen3_variant)
+        # The engine's language list is authoritative; the assignment list is the fallback.
+        languages = status.languages or list(catalog.assignments)
+        for language in languages:
+            group.add(self._language_row(language, catalog.assignments.get(language, ""), choices))
+        return group
+
+    def _language_row(self, language, current_voice, choices):
+        """Create the selector row of one language.
+
+        Args:
+            language: Two-letter language code.
+            current_voice: Voice the language currently resolves to ("" when none).
+            choices: Voice names offered for selection.
+
+        Returns:
+            An Adw.ComboRow.
+        """
+        row = Adw.ComboRow(
+            title=language_title(language),
+            subtitle=f"Current: {current_voice or 'no voice available'}",
+            model=Gtk.StringList.new([DEFAULT_VOICE_LABEL] + choices),
+            use_markup=False,
+        )
+        # Select before connecting, so building the row never triggers a CLI call.
+        row.set_selected(choices.index(current_voice) + 1 if current_voice in choices else 0)
+        row.connect("notify::selected", self._on_voice_selected, language, choices)
+        return row
+
+    def _on_voice_selected(self, row, _param, language, choices):
+        """Store the voice picked for a language, or clear the choice.
+
+        Args:
+            row: The Adw.ComboRow.
+            _param: Unused GObject property spec.
+            language: Two-letter language code.
+            choices: Voice names in the row's model (after the default entry).
+
+        Returns:
+            None.
+        """
+        index = row.get_selected()
+        # Index 0 is the "Default" entry, which maps to clearing the explicit choice.
+        voice = "--clear" if index == 0 else choices[index - 1]
+        label = "default voice" if index == 0 else voice
+        self.host.run_task(["voice", "set", language, voice],
+                           f"{language_title(language)}: {label}")
+
+    def _cloned_group(self, catalog):
+        """Create the list of cloned voices with attribution and removal buttons.
+
+        Args:
+            catalog: A VoiceCatalog.
+
+        Returns:
+            An Adw.PreferencesGroup.
+        """
+        group = Adw.PreferencesGroup(
+            title="Cloned voices",
+            description="Shipped voices are read-only and come with their licence text. "
+            "Voices you add can be removed again.",
+        )
+        group.set_header_suffix(make_button(
+            label="Add voice…", style=("suggested-action",), on_click=self.on_add_voice
+        ))
+        if not catalog.cloned:
+            # An empty list would look broken, so say how to get started.
+            group.add(make_info_row("No cloned voices yet", "Add one from a WAV and transcript."))
+        for voice in catalog.cloned:
+            group.add(self._cloned_row(voice))
+        return group
+
+    def _cloned_row(self, voice):
+        """Create the row of one cloned voice.
+
+        Args:
+            voice: A ClonedVoice.
+
+        Returns:
+            An Adw.ActionRow.
+        """
+        shipped = voice.source != "user"
+        row = make_info_row(voice.name, "Shipped with hyprland-tts" if shipped else "Added by you")
+        row.add_suffix(make_button(
+            icon="help-about-symbolic",
+            tooltip="Attribution and licence" if shipped else "Licence note",
+            on_click=functools.partial(self.on_show_attribution, voice),
+        ))
+        # Shipped voices live in a read-only package directory, so only user voices get Remove.
+        if not shipped:
+            row.add_suffix(make_button(
+                icon="user-trash-symbolic", tooltip="Remove",
+                style=("flat", "destructive-action"),
+                on_click=functools.partial(self.on_remove_voice, voice.name),
+            ))
+        return row
+
+    def on_show_attribution(self, voice):
+        """Show the attribution or licence text of a voice.
+
+        Args:
+            voice: A ClonedVoice.
+
+        Returns:
+            None.
+        """
+        text = read_voice_document(voice)
+        # A missing file is reported honestly instead of showing an empty dialog.
+        if text is None:
+            text = "No attribution file was found for this voice on disk."
+        dialog = create_dialog(f"Voice: {voice.name}", "")
+        scroller = Gtk.ScrolledWindow(min_content_height=240, min_content_width=420)
+        # Selectable text lets the user copy the citation out of the attribution.
+        scroller.set_child(Gtk.Label(label=text, wrap=True, selectable=True, xalign=0,
+                                     margin_start=6, margin_end=6))
+        dialog.set_extra_child(scroller)
+        dialog.add_response("close", "Close")
+        present_dialog(dialog, self.host)
+
+    def on_remove_voice(self, name):
+        """Ask before deleting a user voice.
+
+        Args:
+            name: Voice name.
+
+        Returns:
+            None.
+        """
+        self.host.confirm(
+            "Remove voice?", f"Delete “{name}” and its reference recording from disk?",
+            "Remove", lambda: self.host.run_task(["voice", "remove", name], f"Removed {name}"),
+        )
+
+    def on_add_voice(self):
+        """Open the add-voice dialog with its mandatory licence confirmation.
+
+        Returns:
+            None.
+        """
+        dialog = create_dialog(
+            "Add a cloned voice",
+            "The voice is created locally from a short recording. Only use recordings you "
+            "may use for this.",
+        )
+        form = AddVoiceForm(lambda: dialog.set_response_enabled("add", form.is_valid()))
+        dialog.set_extra_child(form)
+        # Two outcomes only: back out, or add the voice.
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("add", "Add voice")
+        dialog.set_response_appearance("add", Adw.ResponseAppearance.SUGGESTED)
+        # Disabled until the form is complete, so consent can never be skipped.
+        dialog.set_response_enabled("add", False)
+        dialog.connect("response", self._on_add_response, form)
+        present_dialog(dialog, self.host)
+
+    def _on_add_response(self, _dialog, response, form):
+        """Run `voice add` when the user confirmed a valid form.
+
+        Args:
+            _dialog: The dialog (unused).
+            response: Response id.
+            form: The AddVoiceForm.
+
+        Returns:
+            None.
+        """
+        if response != "add" or not form.is_valid():
+            return
+        self.add_voice(form.values())
+
+    def add_voice(self, values):
+        """Write the temporary transcript and licence files and run `voice add`.
+
+        Args:
+            values: Result of AddVoiceForm.values().
+
+        Returns:
+            None.
+        """
+        transcript_path = write_private_file(values["transcript"], ".txt")
+        temporary_files = [transcript_path]
+        licence_path = values["licence"]
+        # Without a licence file the consent confirmation itself is recorded as the licence.
+        if not licence_path:
+            licence_path = write_private_file(CONSENT_NOTE, ".txt")
+            temporary_files.append(licence_path)
+        args = build_voice_add_args(values, transcript_path, licence_path)
+        # The cleanup callback deletes the temporary files once the command has finished.
+        started = self.host.run_task(
+            args, f"Voice added: {values['name']}", VOICE_ADD_TIMEOUT,
+            lambda _return_code: remove_files(temporary_files),
+        )
+        # A refused task (another one is running) never calls the cleanup itself.
+        if not started:
+            remove_files(temporary_files)
+
+
+def remove_files(paths):
+    """Delete files, ignoring ones that are already gone.
+
+    Args:
+        paths: Iterable of file paths.
+
+    Returns:
+        None.
+    """
+    for path in paths:
+        # A vanished temp file is the desired end state anyway.
+        with contextlib.suppress(OSError):
+            os.remove(path)
+
+
+class PiperVoicesSection(Gtk.Box):
+    """Piper voice management: fallback voice, installed voices, catalogue, custom URL."""
+
+    def __init__(self, host):
+        """Create the empty section.
+
+        Args:
+            host: The TtsWindow (or a test double).
+
+        Returns:
+            None.
+        """
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+        self.host = host
+
+    def render(self, installed_result, catalog_result):
+        """Rebuild the groups from fresh CLI data.
+
+        Args:
+            installed_result: CliResult of `model list --porcelain`.
+            catalog_result: CliResult of `model catalog --porcelain`.
+
+        Returns:
+            None.
+        """
+        clear_box(self)
+        installed = []
+        catalog = []
+        # A failed listing becomes a toast; the page still renders the catalogue.
+        if installed_result.returncode == 0:
+            installed = parse_installed_voices(installed_result.stdout)
+        else:
+            self.host.toast(error_message(installed_result, "could not list installed voices"))
+        if catalog_result.returncode == 0:
+            # The catalogue is optional: without it the page shows just the installed voices.
+            catalog = parse_catalog_voices(catalog_result.stdout)
+        for group in (self._fallback_group(installed), self._installed_group(installed),
+                      self._catalog_group(catalog)):
+            self.append(group)
+
+    def _fallback_group(self, installed):
+        """Create the fallback-voice group.
+
+        Args:
+            installed: Parsed installed voices.
+
+        Returns:
+            An Adw.PreferencesGroup.
+        """
+        group = Adw.PreferencesGroup(
+            title="Piper fallback voice",
+            description="Used when the language of the selected text can't be detected, "
+            "instead of just reusing the last voice you spoke with.",
+        )
+        fallback = next((voice for voice in installed if voice["fallback"]), None)
+        if fallback is None:
+            # Without a fallback the router reuses the last voice, which the row says.
+            group.add(make_info_row("Not set", "Falls back to the last voice you used"))
+            return group
+        row = make_info_row(fallback["name"], fallback["lang"].upper())
+        row.add_suffix(make_button(label="Clear", on_click=self.on_clear_fallback))
+        # The row shows the pinned voice with a button to unpin it.
+        group.add(row)
+        return group
+
+    def _installed_group(self, installed):
+        """Create the installed-voices group.
+
+        Args:
+            installed: Parsed installed voices.
+
+        Returns:
+            An Adw.PreferencesGroup.
+        """
+        group = Adw.PreferencesGroup(
+            title="Installed Piper voices",
+            description="Set a per-language default, or the fallback voice above, or remove.",
+        )
+        if not installed:
+            group.add(make_info_row("No voices installed yet",
+                                    "Install one from the list below."))
+        # One row per installed voice, in the CLI's order.
+        for voice in installed:
+            group.add(self._installed_row(voice))
+        return group
+
+    def _installed_row(self, voice):
+        """Create the row of one installed Piper voice.
+
+        Args:
+            voice: Dict from parse_installed_voices.
+
+        Returns:
+            An Adw.ActionRow.
+        """
+        tags = [voice["lang"].upper(), human_size(voice["size"])]
+        # The tags tell the user why a voice is special without opening a menu.
+        for flag, text in (("default", "default"), ("fallback", "fallback"),
+                           ("last", "last used")):
+            if voice[flag]:
+                tags.append(text)
+        row = make_info_row(voice["name"], " · ".join(tags))
+        # The id (language/model) is what every model subcommand takes.
+        voice_id = voice["id"]
+        if not voice["default"]:
+            row.add_suffix(make_button(
+                icon="starred-symbolic", tooltip=f"Make default for {voice['lang'].upper()}",
+                on_click=functools.partial(self.on_set_default, voice_id),
+            ))
+        if not voice["fallback"]:
+            # Fallback pins this voice for text whose language cannot be detected.
+            row.add_suffix(make_button(
+                label="Fallback", tooltip="Use when the language isn't detected",
+                on_click=functools.partial(self.on_set_fallback, voice_id),
+            ))
+        row.add_suffix(make_button(
+            icon="user-trash-symbolic", tooltip="Remove", style=("flat", "destructive-action"),
+            on_click=functools.partial(self.on_remove, voice_id),
+        ))
+        return row
+
+    def _catalog_group(self, catalog):
+        """Create the downloadable-voices group with the custom-URL button.
+
+        Args:
+            catalog: Parsed catalogue entries.
+
+        Returns:
+            An Adw.PreferencesGroup.
+        """
+        group = Adw.PreferencesGroup(
+            title="Available Piper voices", description="Curated voices (downloaded locally)."
+        )
+        group.set_header_suffix(make_button(
+            label="From URL…", tooltip="Install a Piper .onnx model from a custom URL",
+            on_click=self.on_add_url,
+        ))
+        for entry in catalog:
+            # One row per curated voice, installed or not.
+            group.add(self._catalog_row(entry))
+        return group
+
+    def _catalog_row(self, entry):
+        """Create the row of one downloadable voice.
+
+        Args:
+            entry: Dict from parse_catalog_voices.
+
+        Returns:
+            An Adw.ActionRow.
+        """
+        row = make_info_row(entry["label"],
+                            f"{entry['lang'].upper()} · {entry['quality']} · {entry['key']}")
+        # Installed voices get a check mark; the rest an Install button.
+        if entry["installed"]:
+            mark = Gtk.Image.new_from_icon_name("emblem-ok-symbolic")
+            mark.set_tooltip_text("Installed")
+            row.add_suffix(mark)
+        else:
+            # A voice that is not on disk yet gets a download button instead of a check mark.
+            row.add_suffix(make_button(
+                label="Install", style=("suggested-action",),
+                on_click=functools.partial(self.on_install, entry["key"]),
+            ))
+        return row
 
     def on_install(self, key):
-        self.toast(f"Downloading {key}…")
-        self._worker(["model", "install", key], f"Installed {key}", timeout=600)
+        """Download a catalogue voice.
 
-    def on_set_default(self, vid):
-        self._worker(["model", "default", vid], f"Default set: {vid}", timeout=10)
+        Args:
+            key: Catalogue key.
 
-    def on_set_fallback(self, vid):
-        self._worker(["model", "fallback", vid], f"Fallback voice set: {vid}", timeout=10)
+        Returns:
+            None.
+        """
+        self.host.toast(f"Downloading {key}…")
+        self.host.run_task(["model", "install", key], f"Installed {key}", DOWNLOAD_TIMEOUT)
 
-    def on_remove(self, vid):
-        dialog = Adw.MessageDialog(transient_for=self, heading="Remove voice?",
-                                   body=f"Delete “{vid}” from disk? This cannot be undone.")
-        dialog.add_response("cancel", "Cancel")
-        dialog.add_response("remove", "Remove")
-        dialog.set_response_appearance("remove", Adw.ResponseAppearance.DESTRUCTIVE)
-        dialog.connect("response", lambda _d, r, i=vid:
-                       r == "remove" and self._worker(["model", "remove", i],
-                                                       f"Removed {i}", timeout=10))
-        dialog.present()
+    def on_set_default(self, voice_id):
+        """Make a voice the default of its language.
 
-    def on_add_url(self, _btn):
-        dialog = Adw.MessageDialog(
-            transient_for=self, heading="Install from custom URL",
-            body="Link to a Piper .onnx model. The .onnx.json is fetched automatically "
-                 "if you leave it blank.")
+        Args:
+            voice_id: Voice identifier from `model list`.
+
+        Returns:
+            None.
+        """
+        self.host.run_task(["model", "default", voice_id], f"Default set: {voice_id}")
+
+    def on_set_fallback(self, voice_id):
+        """Make a voice the fallback for undetected languages.
+
+        Args:
+            voice_id: Voice identifier from `model list`.
+
+        Returns:
+            None.
+        """
+        self.host.run_task(["model", "fallback", voice_id], f"Fallback voice set: {voice_id}")
+
+    def on_clear_fallback(self):
+        """Go back to "reuse the last voice" for undetected languages.
+
+        Returns:
+            None.
+        """
+        self.host.run_task(["model", "fallback", "--clear"], "Fallback voice cleared")
+
+    def on_remove(self, voice_id):
+        """Ask before deleting a Piper voice.
+
+        Args:
+            voice_id: Voice identifier from `model list`.
+
+        Returns:
+            None.
+        """
+        self.host.confirm(
+            "Remove voice?", f"Delete “{voice_id}” from disk? This cannot be undone.", "Remove",
+            lambda: self.host.run_task(["model", "remove", voice_id], f"Removed {voice_id}"),
+        )
+
+    def on_add_url(self):
+        """Open the custom-URL dialog.
+
+        Returns:
+            None.
+        """
+        dialog = create_dialog(
+            "Install from custom URL",
+            "Link to a Piper .onnx model. The .onnx.json is fetched automatically "
+            "if you leave it blank.",
+        )
         grid = Gtk.Grid(row_spacing=8, column_spacing=8, margin_top=8)
-        lang_e = Gtk.Entry(placeholder_text="lang (e.g. it, pl)", max_length=3)
-        onnx_e = Gtk.Entry(placeholder_text="https://…/voice.onnx", hexpand=True)
-        json_e = Gtk.Entry(placeholder_text="https://…/voice.onnx.json (optional)", hexpand=True)
-        for i, (lbl, w) in enumerate((("Language", lang_e), ("Model URL", onnx_e),
-                                      ("JSON URL", json_e))):
-            grid.attach(Gtk.Label(label=lbl, halign=Gtk.Align.END), 0, i, 1, 1)
-            grid.attach(w, 1, i, 1, 1)
+        entries = (
+            ("Language", Gtk.Entry(placeholder_text="lang (e.g. it, pl)", max_length=3)),
+            ("Model URL", Gtk.Entry(placeholder_text="https://…/voice.onnx", hexpand=True)),
+            ("JSON URL", Gtk.Entry(placeholder_text="https://…/voice.onnx.json (optional)",
+                                   hexpand=True)),
+        )
+        # Caption and entry share a grid row, which keeps the entries aligned.
+        for row_index, (caption, entry) in enumerate(entries):
+            grid.attach(Gtk.Label(label=caption, halign=Gtk.Align.END), 0, row_index, 1, 1)
+            grid.attach(entry, 1, row_index, 1, 1)
         dialog.set_extra_child(grid)
+        # Cancel and Install are the dialog's only outcomes.
         dialog.add_response("cancel", "Cancel")
         dialog.add_response("install", "Install")
         dialog.set_response_appearance("install", Adw.ResponseAppearance.SUGGESTED)
-        dialog.connect("response", self._on_add_url_response, lang_e, onnx_e, json_e)
-        dialog.present()
+        dialog.connect("response", self._on_add_url_response, [entry for _c, entry in entries])
+        # Shown last, after every handler is connected.
+        present_dialog(dialog, self.host)
 
-    def _on_add_url_response(self, _dialog, response, lang_e, onnx_e, json_e):
+    def _on_add_url_response(self, _dialog, response, entries):
+        """Start the custom-URL install when the user confirmed.
+
+        Args:
+            _dialog: The dialog (unused).
+            response: Response id.
+            entries: The language, model URL and JSON URL Gtk.Entry widgets.
+
+        Returns:
+            None.
+        """
         if response != "install":
             return
-        lang, onnx, js = (lang_e.get_text().strip(), onnx_e.get_text().strip(),
-                          json_e.get_text().strip())
-        if not lang or not onnx:
-            self.toast("Language and model URL are required.")
+        language, onnx_url, json_url = (entry.get_text().strip() for entry in entries)
+        # The CLI needs at least a language and the model URL.
+        if not language or not onnx_url:
+            self.host.toast("Language and model URL are required.")
             return
-        args = ["model", "install-url", lang, onnx] + ([js] if js else [])
-        self.toast("Downloading…")
-        self._worker(args, "Custom voice installed", timeout=600)
+        # The optional JSON URL is appended only when given; the CLI derives it otherwise.
+        args = ["model", "install-url", language, onnx_url] + ([json_url] if json_url else [])
+        self.host.toast("Downloading…")
+        self.host.run_task(args, "Custom voice installed", DOWNLOAD_TIMEOUT)
+
+
+class VoicesPage(PageBase):
+    """Neural voices per language, cloned voices and the Piper voice manager."""
+
+    def __init__(self, host):
+        """Build the page from its two sections.
+
+        Args:
+            host: The TtsWindow (or a test double).
+
+        Returns:
+            None.
+        """
+        super().__init__(host)
+        self.neural = NeuralVoicesSection(host)
+        self.piper = PiperVoicesSection(host)
+        # Neural voices lead the page; the Piper manager follows below.
+        self.content.append(self.neural)
+        self.content.append(self.piper)
+
+    def refresh(self):
+        """Query engine status, neural voices and Piper voices, then re-render.
+
+        Returns:
+            None.
+        """
+        token = self.next_token()
+        commands = [
+            ["engine", "status", "--porcelain"],
+            ["voice", "list", "--porcelain"],
+            ["model", "list", "--porcelain"],
+            ["model", "catalog", "--porcelain"],
+        ]
+        self.host.query(commands, lambda results: self._render(token, results))
+
+    def _render(self, token, results):
+        """Render both sections unless a newer refresh superseded this one.
+
+        Args:
+            token: Refresh generation the queries belonged to.
+            results: Four CliResults in the order of refresh().
+
+        Returns:
+            None.
+        """
+        if not self.is_current(token):
+            return
+        status_result, voice_result, installed_result, catalog_result = results
+        # A failed status query only costs the variant hint, never the whole page.
+        status = parse_engine_status(status_result.stdout if status_result.returncode == 0 else "")
+        self.neural.render(status, voice_result)
+        self.piper.render(installed_result, catalog_result)
+
+
+class LanguagePage(PageBase):
+    """Language-detection helper environment: status, install with log, removal, explanation."""
+
+    def __init__(self, host):
+        """Build the groups once; refresh() updates the status rows.
+
+        Args:
+            host: The TtsWindow (or a test double).
+
+        Returns:
+            None.
+        """
+        super().__init__(host)
+        self._status = DepsStatus()
+        self._build_status_group()
+        # The log panel sits between the status group and the explanation.
+        self.install_panel = JobPanel(self._on_install_finished)
+        self.content.append(self.install_panel)
+        self._build_explanation_group()
+
+    def _build_status_group(self):
+        """Create the status rows and the install / remove buttons.
+
+        Returns:
+            None.
+        """
+        group = Adw.PreferencesGroup(title="Language detection")
+        self.summary_row = make_info_row("Status")
+        self.python_row = make_info_row("Python helper environment")
+        # Two detail rows tell where the helper pieces live.
+        self.model_row = make_info_row("fastText language model")
+        self.install_button = make_button(
+            label="Install", style=("suggested-action",), on_click=self._on_install_clicked
+        )
+        self.remove_button = make_button(
+            label="Remove", style=("destructive-action",), on_click=self._on_remove_clicked
+        )
+        self.summary_row.add_suffix(self.remove_button)
+        # The buttons live on the summary row because they act on the whole setup.
+        self.summary_row.add_suffix(self.install_button)
+        for row in (self.summary_row, self.python_row, self.model_row):
+            group.add(row)
+        self.content.append(group)
+
+    def _build_explanation_group(self):
+        """Create the explanatory text, including what happens without the helpers.
+
+        Returns:
+            None.
+        """
+        group = Adw.PreferencesGroup(title="What this does")
+        for title, text in (
+            ("Per-sentence language detection",
+             ("A small offline model (fastText, about 1 MB) detects the language of every "
+              "sentence, so mixed German/English text switches voice sentence by sentence.")),
+            ("Number and abbreviation reading",
+             ("Numbers, dates, currency and abbreviations are written out per language before "
+              "speaking, because the neural voice would otherwise read them literally.")),
+            ("Without it (fallback)",
+             ("A simple built-in router guesses German, French, Spanish or English from "
+              "stop-words for the whole text. Everything still works, but mixed-language texts "
+              "stay in one voice and numbers may sound wrong.")),
+            ("If the install fails on Python 3.14",
+             ("fasttext-predict has no wheel for 3.14 yet and is built from source, which needs "
+              "g++ (pacman -S gcc). Alternatively start the GUI with "
+              "HTTS_DEPS_PYTHON=python3.13.")),
+        ):
+            row = make_info_row(title, text)
+            # Long explanations need wrapping instead of one clipped line.
+            row.set_subtitle_lines(0)
+            group.add(row)
+        self.content.append(group)
+
+    def refresh(self):
+        """Query the dependency status and update the rows.
+
+        Returns:
+            None.
+        """
+        token = self.next_token()
+        self.host.query(
+            [["deps", "status", "--porcelain"]],
+            lambda results: self._on_status_result(token, results[0]),
+        )
+
+    def _on_status_result(self, token, result):
+        """Apply a status query result unless a newer refresh superseded it.
+
+        Args:
+            token: Refresh generation the query belonged to.
+            result: CliResult of `deps status --porcelain`.
+
+        Returns:
+            None.
+        """
+        if not self.is_current(token):
+            return
+        # The command exits 1 when helpers are missing, so stdout is parsed regardless of status.
+        self.apply_status(parse_deps_status(result.stdout))
+
+    def apply_status(self, status):
+        """Show a parsed status and enable the matching buttons.
+
+        Args:
+            status: A DepsStatus.
+
+        Returns:
+            None.
+        """
+        self._status = status
+        self.summary_row.set_subtitle(describe_deps(status))
+        python_text = status.python or "missing"
+        # Distribution packages make a private environment unnecessary.
+        if status.system_packages and not status.python:
+            python_text = "system packages (no private environment needed)"
+        self.python_row.set_subtitle(python_text)
+        self.model_row.set_subtitle(status.model or "missing")
+        # Buttons follow the state that was just displayed.
+        self._update_button_state()
+
+    def _update_button_state(self):
+        """Enable Install when something is missing and Remove when something exists.
+
+        Returns:
+            None.
+        """
+        installing = self.install_panel.running
+        self.install_button.set_sensitive(not installing and not self._status.ready)
+        has_files = bool(self._status.python or self._status.model)
+        # Remove needs something to delete and no install running.
+        self.remove_button.set_sensitive(not installing and has_files)
+
+    def _on_install_clicked(self):
+        """Start `deps install` with live output.
+
+        Returns:
+            None.
+        """
+        if self.install_panel.start(["deps", "install"]):
+            self._update_button_state()
+
+    def _on_install_finished(self, return_code, cancelled, last_line):
+        """Report the outcome and reload the status.
+
+        Args:
+            return_code: Exit status of `deps install`.
+            cancelled: True when the user cancelled it.
+            last_line: Last output line, used as the error text.
+
+        Returns:
+            None.
+        """
+        # Unlock the buttons right away instead of waiting for the status query to return.
+        self._update_button_state()
+        if cancelled:
+            self.host.toast("Installation cancelled")
+        elif return_code == 0:
+            # Success is confirmed even when the user already switched to another page.
+            self.host.toast("Language detection is ready")
+        else:
+            self.host.toast(last_line or f"Installation failed (exit {return_code})")
+        self.host.refresh()
+
+    def _on_remove_clicked(self):
+        """Ask before deleting the helper environment.
+
+        Returns:
+            None.
+        """
+        self.host.confirm(
+            "Remove language detection?",
+            "The helper environment and the language model are deleted. The simple built-in "
+            "router is used until you install them again.",
+            "Remove",
+            lambda: self.host.run_task(["deps", "remove"], "Language detection removed"),
+        )
+
+    def has_running_job(self):
+        """Tell whether the install is running.
+
+        Returns:
+            True while `deps install` runs.
+        """
+        return self.install_panel.running
+
+    def cancel_jobs(self):
+        """Cancel the running install.
+
+        Returns:
+            None.
+        """
+        self.install_panel.cancel()
+
+
+class ShortcutsPage(PageBase):
+    """Keyboard shortcut list with press-to-rebind and conflict confirmation."""
+
+    def refresh(self):
+        """Query the shortcut list and re-render.
+
+        Returns:
+            None.
+        """
+        token = self.next_token()
+        self.host.query(
+            [["keybind", "list", "--porcelain"]],
+            lambda results: self._render(token, results[0]),
+        )
+
+    def _render(self, token, result):
+        """Rebuild the shortcut rows from a query result.
+
+        Args:
+            token: Refresh generation the query belonged to.
+            result: CliResult of `keybind list --porcelain`.
+
+        Returns:
+            None.
+        """
+        if not self.is_current(token):
+            return
+        clear_box(self.content)
+        # The description tells users that clashes are checked before anything is bound.
+        group = Adw.PreferencesGroup(
+            title="Keyboard shortcuts",
+            description="Click a shortcut to rebind it. New bindings are checked "
+            "against your other Hyprland shortcuts first.",
+        )
+        self.content.append(group)
+        if result.returncode != 0:
+            group.add(make_info_row("Could not read shortcuts",
+                                    error_message(result, "keybind list failed")))
+            # No shortcut rows can be drawn without a list.
+            return
+        for line in result.stdout.splitlines():
+            parts = line.split("\t")
+            # Only complete action/label/combo triples are shortcut rows.
+            if len(parts) == 3:
+                group.add(self._shortcut_row(*parts))
+        self.content.append(self._reset_group())
+
+    def _shortcut_row(self, action, label, combo):
+        """Create the row of one shortcut.
+
+        Args:
+            action: Action id such as "speak".
+            label: Human-readable action name.
+            combo: Current combo such as "SUPER, A" ("" when unset).
+
+        Returns:
+            An Adw.ActionRow.
+        """
+        row = make_info_row(label, action)
+        button = make_button(
+            label=combo or "unset", on_click=functools.partial(self.on_rebind, action, label)
+        )
+        row.add_suffix(button)
+        # Clicking anywhere on the row triggers the rebind button.
+        row.set_activatable_widget(button)
+        return row
+
+    def _reset_group(self):
+        """Create the "reset all shortcuts" group.
+
+        Returns:
+            An Adw.PreferencesGroup.
+        """
+        group = Adw.PreferencesGroup()
+        row = make_info_row("Reset all shortcuts", "Restore the default key bindings")
+        row.add_suffix(make_button(
+            label="Reset", style=(),
+            on_click=lambda: self.host.run_task(["keybind", "reset"], "Shortcuts reset"),
+        ))
+        # A single row keeps the destructive reset away from the shortcut list.
+        group.add(row)
+        return group
+
+    def on_rebind(self, action, label):
+        """Open the press-a-key dialog for one shortcut.
+
+        Args:
+            action: Action id.
+            label: Human-readable action name.
+
+        Returns:
+            None.
+        """
+        dialog = create_dialog(f"Rebind “{label}”", "Press the new key combination…")
+        capture = Gtk.Label(label="Waiting for keys…", margin_top=12, margin_bottom=12)
+        capture.add_css_class("title-2")
+        # The label echoes the captured combination live.
+        dialog.set_extra_child(capture)
+        chosen = {"combo": None}
+        controller = Gtk.EventControllerKey()
+        controller.connect("key-pressed", self._on_key_pressed, dialog, capture, chosen)
+        # The key controller listens on the dialog itself, so any key press is captured.
+        dialog.add_controller(controller)
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("apply", "Apply")
+        dialog.set_response_enabled("apply", False)
+        # Apply becomes the suggested action once a combination was captured.
+        dialog.set_response_appearance("apply", Adw.ResponseAppearance.SUGGESTED)
+        dialog.connect("response", self._on_rebind_response, action, chosen)
+        present_dialog(dialog, self.host)
+
+    @staticmethod
+    def _on_key_pressed(_controller, keyval, _keycode, modifiers, dialog, capture, chosen):
+        """Record the pressed combination and enable Apply.
+
+        Args:
+            _controller: The key controller (unused).
+            keyval: Gdk key value.
+            _keycode: Hardware keycode (unused).
+            modifiers: Active modifier mask.
+            dialog: The rebind dialog.
+            capture: Label that echoes the combination.
+            chosen: Dict that receives the combination under "combo".
+
+        Returns:
+            True, so the key never reaches other handlers.
+        """
+        combo = accel_to_combo(keyval, modifiers)
+        if combo:
+            chosen["combo"] = combo
+            # Echo the combination so the user sees exactly what will be bound.
+            capture.set_text(combo)
+            dialog.set_response_enabled("apply", True)
+        return True
+
+    def _on_rebind_response(self, _dialog, response, action, chosen):
+        """Check the new combination for conflicts, then bind or ask.
+
+        Args:
+            _dialog: The dialog (unused).
+            response: Response id.
+            action: Action id.
+            chosen: Dict holding the captured combo.
+
+        Returns:
+            None.
+        """
+        if response != "apply" or not chosen["combo"]:
+            return
+        combo = chosen["combo"]
+        # The CLI asks Hyprland (hyprctl binds) whether the combination is already taken.
+        self.host.query(
+            [["keybind", "check", combo]],
+            lambda results: self._on_conflict_result(action, combo, results[0]),
+        )
+
+    def _on_conflict_result(self, action, combo, result):
+        """Bind straight away, or ask when the combination is taken.
+
+        Args:
+            action: Action id.
+            combo: The captured combination.
+            result: CliResult of `keybind check`.
+
+        Returns:
+            None.
+        """
+        conflict = result.stdout.strip()
+        if not conflict:
+            self.host.run_task(["keybind", "set", action, combo], f"Bound to {combo}")
+            # Done: a free combination needs no confirmation.
+            return
+        self.host.confirm(
+            "Shortcut already in use",
+            f"“{combo}” is already bound to:\n{conflict}\n\nBind it anyway?",
+            "Bind anyway",
+            lambda: self.host.run_task(
+                ["keybind", "set", action, combo, "--force"], f"Bound to {combo}"
+            ),
+        )
+
+
+class TtsWindow(Adw.ApplicationWindow):
+    """Main window: four pages, a busy spinner and the shared task / query / dialog helpers."""
+
+    def __init__(self, app):
+        """Build the window and schedule the first refresh.
+
+        Args:
+            app: The owning Adw.Application.
+
+        Returns:
+            None.
+        """
+        super().__init__(application=app, title="hyprland-tts")
+        self.set_default_size(640, 780)
+        self._busy = False
+        # Toasts overlay the whole window so every page can report results.
+        self.toasts = Adw.ToastOverlay()
+        self.set_content(self.toasts)
+        self.stack = Adw.ViewStack()
+        self.spinner = Gtk.Spinner()
+        # The header bar is built first; the stack it switches already exists.
+        self._build_chrome()
+        self.pages = self._add_pages()
+        # Closing mid-install must not silently orphan or kill a 7 minute build.
+        self.connect("close-request", self._on_close_request)
+        # The first refresh waits for the window to be shown so startup feels instant.
+        GLib.idle_add(self.refresh)
+
+    def _build_chrome(self):
+        """Create the header bar with the view switcher, spinner and refresh button.
+
+        Returns:
+            None.
+        """
+        toolbar = Adw.ToolbarView()
+        self.toasts.set_child(toolbar)
+        header = Adw.HeaderBar()
+        # The header bar carries the page switcher.
+        toolbar.add_top_bar(header)
+        header.set_title_widget(
+            Adw.ViewSwitcher(stack=self.stack, policy=Adw.ViewSwitcherPolicy.WIDE)
+        )
+        header.pack_end(self.spinner)
+        header.pack_start(make_button(
+            icon="view-refresh-symbolic", tooltip="Refresh", on_click=self.refresh
+        ))
+        # The stack of pages fills the area below the header.
+        toolbar.set_content(self.stack)
+
+    def _add_pages(self):
+        """Create the pages and register them with the view stack.
+
+        Returns:
+            Dict mapping page name to page widget.
+        """
+        pages = {
+            "engine": (EnginePage(self), "Engine", "applications-engineering-symbolic"),
+            "voices": (VoicesPage(self), "Voices", "audio-speakers-symbolic"),
+            "language": (LanguagePage(self), "Language", "preferences-desktop-locale-symbolic"),
+            "keys": (ShortcutsPage(self), "Shortcuts", "input-keyboard-symbolic"),
+        }
+        for name, (page, title, icon) in pages.items():
+            self.stack.add_titled_with_icon(page, name, title, icon)
+        # Callers look pages up by name, without the title and icon.
+        return {name: page for name, (page, _title, _icon) in pages.items()}
+
+    def toast(self, text):
+        """Show a short message at the bottom of the window.
+
+        Args:
+            text: Message text; shown verbatim (no markup).
+
+        Returns:
+            None.
+        """
+        self.toasts.add_toast(Adw.Toast(title=text, timeout=4, use_markup=False))
+
+    def set_busy(self, busy):
+        """Show or hide the header spinner and remember the state.
+
+        Args:
+            busy: True while a short task runs.
+
+        Returns:
+            None.
+        """
+        self._busy = busy
+        if busy:
+            self.spinner.start()
+        else:
+            # Stopping hides the indicator once the task has finished.
+            self.spinner.stop()
+
+    def refresh(self):
+        """Reload every page from the CLI.
+
+        Returns:
+            False, so it can double as a one-shot idle callback.
+        """
+        # Without a CLI the pages keep their empty state; main() already warned about it.
+        if not CLI_PATH:
+            return False
+        for page in self.pages.values():
+            page.refresh()
+        # False removes this one-shot idle callback after the refresh was started.
+        return False
+
+    def query(self, commands, callback):
+        """Run several read-only CLI commands off the main thread.
+
+        Args:
+            commands: List of argument lists.
+            callback: Called on the main loop with the list of CliResults.
+
+        Returns:
+            None.
+        """
+        def work():
+            """Run the commands one after another and hand the results over.
+
+            Returns:
+                None.
+            """
+            results = [run_cli(command, timeout=QUERY_TIMEOUT) for command in commands]
+            on_main_thread(callback, results)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def run_task(self, args, ok_message, timeout=TASK_TIMEOUT, on_done=None):
+        """Run one short write command in the background and report with a toast.
+
+        Args:
+            args: Argument list after the executable name.
+            ok_message: Toast text on success.
+            timeout: Seconds before the command is abandoned.
+            on_done: Optional callable taking the return code, run before the refresh.
+
+        Returns:
+            True when started; False when another task is still running.
+        """
+        if self._busy:
+            self.toast("Please wait for the current operation to finish.")
+            return False
+        # Show the spinner right away so the click feels acknowledged.
+        self.set_busy(True)
+
+        def work():
+            """Run the command and hand the result to the main loop.
+
+            Returns:
+                None.
+            """
+            result = run_cli(args, timeout=timeout)
+            on_main_thread(self._finish_task, result, ok_message, on_done)
+
+        threading.Thread(target=work, daemon=True).start()
+        # The worker thread reports back on its own; True only says the task started.
+        return True
+
+    def _finish_task(self, result, ok_message, on_done):
+        """Report a finished task, run its cleanup and reload the pages.
+
+        Args:
+            result: The CliResult.
+            ok_message: Toast text on success.
+            on_done: Optional callable taking the return code.
+
+        Returns:
+            None.
+        """
+        self.set_busy(False)
+        self.toast(ok_message if result.returncode == 0 else error_message(result))
+        if on_done:
+            # The cleanup callback runs before the refresh so temporary files are gone by then.
+            on_done(result.returncode)
+        self.refresh()
+
+    def confirm(self, heading, body, action_label, on_accept):
+        """Ask for confirmation before a destructive action.
+
+        Args:
+            heading: Dialog title.
+            body: Explanatory text.
+            action_label: Text of the destructive button.
+            on_accept: Callable without arguments, run only when confirmed.
+
+        Returns:
+            None.
+        """
+        dialog = create_dialog(heading, body)
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("confirm", action_label)
+        # The red button warns that the action cannot be undone.
+        dialog.set_response_appearance("confirm", Adw.ResponseAppearance.DESTRUCTIVE)
+        # Only the explicit confirm response runs the action; Cancel and Escape do nothing.
+        dialog.connect(
+            "response", lambda _dialog, response: response == "confirm" and on_accept()
+        )
+        present_dialog(dialog, self)
+
+    def _running_pages(self):
+        """List the pages that currently own a running long command.
+
+        Returns:
+            List of pages.
+        """
+        return [page for page in self.pages.values() if page.has_running_job()]
+
+    def _on_close_request(self, _window):
+        """Block closing while an install runs, unless the user cancels it.
+
+        Args:
+            _window: The window (unused).
+
+        Returns:
+            True to block the close; False to let it proceed.
+        """
+        if not self._running_pages():
+            return False
+        self.confirm(
+            "Installation in progress",
+            "Closing the window cancels the running installation.",
+            "Cancel install and close",
+            self._cancel_jobs_and_close,
+        )
+        # Vetoing the close lets the dialog decide whether the job gets cancelled.
+        return True
+
+    def _cancel_jobs_and_close(self):
+        """Cancel every running install and close the window.
+
+        Returns:
+            None.
+        """
+        for page in self._running_pages():
+            page.cancel_jobs()
+        self.destroy()
 
 
 class TtsApp(Adw.Application):
-    def __init__(self):
-        super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
+    """Single-instance application that shows one TtsWindow."""
+
+    def __init__(self, application_id=APP_ID, flags=Gio.ApplicationFlags.DEFAULT_FLAGS):
+        """Register the application id.
+
+        Args:
+            application_id: D-Bus name that makes the application single-instance.
+            flags: Gio application flags; tests pass NON_UNIQUE to avoid the session bus.
+
+        Returns:
+            None.
+        """
+        super().__init__(application_id=application_id, flags=flags)
 
     def do_activate(self):
-        win = self.props.active_window or TtsWindow(self)
-        win.present()
+        """Show the existing window or create it.
+
+        Returns:
+            None.
+        """
+        window = self.props.active_window or TtsWindow(self)
+        window.present()
 
 
 def main():
+    """Start the application.
+
+    Returns:
+        Process exit status.
+    """
     if not CLI_PATH:
         sys.stderr.write("hyprland-tts CLI not found in PATH.\n")
         return 1
+    # run() blocks until the last window closes and returns the exit status.
     return TtsApp().run(sys.argv)
 
 
+# Run only as a script, so tests can import the module without opening a window.
 if __name__ == "__main__":
     sys.exit(main())

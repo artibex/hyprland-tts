@@ -1,6 +1,7 @@
 # hyprland-tts 2.0 — Neural engine, real language ID, full polish
 
-Status: in progress on `beta`. Research data (measured on the reference box: Ryzen 6000
+Status: work packages 1–3 and the GUI/documentation part of 4 are done on `beta`; the remaining
+open items are listed under *Open items* at the end. Research data (measured on the reference box: Ryzen 6000
 "Rembrandt", 12 threads, 30 GB RAM, Radeon 680M iGPU, no ROCm/CUDA) is summarised below.
 
 ## 1. Research results
@@ -58,8 +59,30 @@ selection ─► normalize (per language: numbers, dates, currency, abbreviation
 
 ## 3. Work packages
 
-1. Engine layer + Qwen3 backend + on-demand worker + engine install (+ tests with a fake server).
-2. Language ID + per-sentence segmentation + neural-TTS text normalisation (+ pytest).
-3. Native voice evaluation (Qwen3 Base cloning per language) + CPU-only engine benchmark.
-4. Polish: coding standards for every script, test suite, CI (shellcheck, tests, QA gate),
-   GUI (engine/voice per language), README + Agent.md, packaging (PKGBUILD deps, install).
+1. ✅ **Engine layer + Qwen3 backend + on-demand worker + engine install** (+ tests with a fake
+   server). `lib/engine.sh`, `qwen3.sh`, `qwen3_install.sh`, `worker.sh`; bash suites
+   `tests/test_engine_*.sh`.
+2. ✅ **Language ID + per-sentence segmentation + neural-TTS text normalisation** (+ pytest).
+   `lib/py/`, `lib/pyenv.sh`, `tests/py`.
+3. ✅ **Native voice evaluation + CPU-only engine benchmark.** Five clone packs shipped
+   (`share/voices/`); Supertonic 3 / Pocket TTS measured as CPU-only candidates (not integrated).
+4. **Polish**
+   - ✅ **4b — GUI and documentation:** GUI pages Engine / Voices / Language / Shortcuts with async
+     install + cancel, headless tests (`tests/gui`), README rewrite with troubleshooting,
+     Agent.md, CHANGELOG.md, THIRD_PARTY.md.
+   - ✅ Packaging: PKGBUILD 2.0.0 (deps, voices, license metadata), Makefile installs voices, helper
+     modules and the optional docs.
+   - 🔄 **4a — coding standards for every script, bash/pytest suites, CI (shellcheck, tests, QA
+     gate):** tracked by the engine/bash polish work (`tools/qa`, `make qa`).
+
+## 4. Open items
+
+- Land `engine variant base|customvoice`, the "loading voice…" notification and the selection size
+  cap (the GUI and README already refer to them).
+- zh/ja/ko: decide between dropping and limiting them (CJK sentence splitting); the documented
+  support is de/en/fr/es/it, the rest experimental.
+- Listen to and approve the five shipped voices (judged by automatic transcription only).
+- CPU-only engine for machines without a usable GPU (Supertonic 3: RTF ≈0.23, 650 MB,
+  OpenRAIL-M model licence).
+- Shipped voices vs. user voices share a directory with `PREFIX=$HOME/.local` installs.
+- Click-through test of the GUI on a real Wayland session; clean-chroot `makepkg` + `namcap`.

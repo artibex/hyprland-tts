@@ -57,20 +57,103 @@ case_missing_variant_counts_as_not_installed() {
   assert_contains "$(htts engine status)" "active:   piper" "base variant missing -> piper"
 }
 
-# case_base_variant_without_cloned_voice_is_unusable — Base needs a voice, else Piper speaks.
+# case_base_variant_without_cloned_voice_still_speaks — Base falls back to its built-in voice.
 # Args:    none
 # Returns: 0 always
 # Globals: none
-case_base_variant_without_cloned_voice_is_unusable() {
+case_base_variant_without_cloned_voice_still_speaks() {
   test_install_fake_engine "customvoice base"
   test_set_config "QWEN_VARIANT=base"
-  local out; out="$(htts engine status)"
-  assert_contains "$out" "active:   piper" "base without voices -> piper"
-  assert_contains "$out" "no cloned voice" "status explains it"
-  mkdir -p "$XDG_DATA_HOME/hyprland-tts/voices/anna"
-  printf 's' > "$XDG_DATA_HOME/hyprland-tts/voices/anna/ref.spk"
-  printf 'r' > "$XDG_DATA_HOME/hyprland-tts/voices/anna/ref.rvq"
-  assert_contains "$(htts engine status)" "active:   qwen3" "a cloned voice makes it usable"
+  assert_contains "$(htts engine status)" "active:   qwen3" "base without clones is usable"
+}
+
+# case_default_variant_is_base — a fresh configuration selects the native-voice talker.
+# Args:    none
+# Returns: 0 always
+# Globals: none
+case_default_variant_is_base() {
+  assert_eq "base" "$(lib_eval 'printf %s "$QWEN_VARIANT"')" "default variant"
+  assert_eq "base" "$(lib_eval 'qwen3_parse_install_args qwen3 | cut -d" " -f2')" "install default"
+}
+
+# case_status_porcelain_without_install — every contract key is present, qwen3 explained.
+# Args:    none
+# Returns: 0 always
+# Globals: none
+case_status_porcelain_without_install() {
+  test_add_piper_voice de
+  local out; out="$(htts engine status --porcelain)"
+  assert_eq "selected=auto
+active=piper
+qwen3_installed=0
+qwen3_variant=base
+qwen3_device=
+qwen3_reason=not installed
+worker=stopped
+worker_port=
+idle_minutes=10
+piper_languages=de
+languages=de" "$out" "porcelain contract"
+}
+
+# case_status_porcelain_with_running_worker — installed engine, live worker, port reported.
+# Args:    none
+# Returns: 0 always
+# Globals: none
+case_status_porcelain_with_running_worker() {
+  test_install_fake_engine base
+  htts engine start >/dev/null 2>&1
+  local out; out="$(htts engine status --porcelain)"
+  assert_contains "$out" "active=qwen3" "active"
+  assert_contains "$out" "qwen3_installed=1" "installed"
+  assert_contains "$out" "qwen3_device=Vulkan0" "device"
+  assert_contains "$out" "qwen3_reason=
+" "no reason when active"
+  assert_contains "$out" "worker=running" "worker running"
+  assert_eq "$(cat "$HYPRLAND_TTS_WORKER_DIR/port")" "$(printf '%s\n' "$out" | sed -n 's/^worker_port=//p')" "port"
+  assert_contains "$out" "languages=de,en,fr,es,it,pt,ru,zh,ja,ko" "ten languages"
+}
+
+# case_status_porcelain_reasons — variant missing and forced piper are explained.
+# Args:    none
+# Returns: 0 always
+# Globals: none
+case_status_porcelain_reasons() {
+  test_install_fake_engine customvoice
+  test_set_config "QWEN_VARIANT=base"
+  assert_contains "$(htts engine status --porcelain)" "qwen3_reason=variant base is not installed" "variant"
+  test_install_fake_engine base
+  test_set_config "ENGINE=piper"
+  assert_contains "$(htts engine status --porcelain)" "qwen3_reason=engine set to piper" "piper chosen"
+}
+
+# case_engine_config_idle — idle minutes are validated, persisted and reported.
+# Args:    none
+# Returns: 0 always
+# Globals: none
+case_engine_config_idle() {
+  htts engine config idle 25 >/dev/null 2>&1
+  assert_rc 0 "$?" "25 accepted"
+  assert_contains "$(htts engine status --porcelain)" "idle_minutes=25" "reported"
+  local bad
+  for bad in 0 241 abc 05 -3 ""; do
+    htts engine config idle "$bad" >/dev/null 2>&1
+    assert_rc 1 "$?" "'$bad' refused"
+  done
+  htts engine config speed 5 >/dev/null 2>&1
+  assert_rc 1 "$?" "unknown key refused"
+  assert_contains "$(htts engine status --porcelain)" "idle_minutes=25" "unchanged by bad input"
+}
+
+# case_idle_change_reaches_running_worker — the live worker uses the new limit at once.
+# Args:    none
+# Returns: 0 always
+# Globals: none
+case_idle_change_reaches_running_worker() {
+  test_install_fake_engine base
+  htts engine start >/dev/null 2>&1
+  htts engine config idle 3 >/dev/null 2>&1
+  assert_contains "$(htts engine status)" "idle limit 180s" "status shows the new limit"
 }
 
 # case_languages_follow_active_engine — qwen3 speaks ten languages, piper only installed ones.

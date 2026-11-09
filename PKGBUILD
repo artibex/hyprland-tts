@@ -1,12 +1,14 @@
 # Maintainer: artibex <korbinian.maag@gmail.com>
 pkgname=hyprland-tts
-pkgver=1.1.0
-pkgrel=3
-pkgdesc="Accessible, multilingual, offline Text-to-Speech for Hyprland (Piper, optional Qwen3-TTS) with smart playback controls and a voice manager"
+pkgver=2.0.0
+pkgrel=1
+pkgdesc="Accessible, multilingual, offline Text-to-Speech for Hyprland (Qwen3-TTS neural voices, Piper fallback) with smart playback controls and a voice manager"
 arch=('any')
 url="https://github.com/artibex/hyprland-tts"
-license=('GPL3')
-depends=('bash' 'piper-tts-bin' 'wl-clipboard' 'mpv' 'socat' 'procps-ng' 'curl' 'gawk' 'sed' 'grep'
+# Code: Apache-2.0 (LICENSE). Shipped voice clips: CC0/public domain and CC-BY-4.0 (attribution
+# files are installed next to them, see share/hyprland-tts/voices/*/ATTRIBUTION.md).
+license=('Apache-2.0' 'CC-BY-4.0' 'CC0-1.0')
+depends=('bash' 'python' 'piper-tts-bin' 'wl-clipboard' 'mpv' 'socat' 'procps-ng' 'curl' 'gawk' 'sed' 'grep'
          'util-linux' 'findutils' 'gtk4' 'libadwaita' 'python-gobject')
 optdepends=(
   'hyprland: target compositor for keybinds and the hover command'
@@ -15,12 +17,14 @@ optdepends=(
   'perl-image-exiftool: read embedded image description metadata'
   'at-spi2-core: speak text under the mouse cursor (hyprland-tts hover)'
   'libnotify: desktop notifications when a keybind-triggered action fails silently'
+  'python-fasttext-predict: language detection without a private venv (AUR; else: hyprland-tts deps install)'
+  'python-num2words: number and date reading without a private venv (AUR; else: hyprland-tts deps install)'
+  'vulkan-icd-loader: Vulkan loader, needed to run the Qwen3 engine on the GPU'
   'cmake: build the Qwen3 neural engine (hyprland-tts engine install qwen3)'
   'git: fetch the pinned Qwen3 engine sources (hyprland-tts engine install qwen3)'
   'gcc: compile the Qwen3 neural engine (hyprland-tts engine install qwen3)'
-  'make: compile the Qwen3 neural engine (hyprland-tts engine install qwen3)'
+  'make: build tool for the Qwen3 neural engine (hyprland-tts engine install qwen3)'
   'shaderc: glslc shader compiler for the GPU (Vulkan) build of the Qwen3 engine'
-  'vulkan-icd-loader: Vulkan loader for the GPU build of the Qwen3 engine'
   'vulkan-headers: Vulkan headers for the GPU build (pinned ones are fetched if absent)'
   'spirv-headers: SPIR-V headers for the GPU build (pinned ones are fetched if absent)'
 )
@@ -53,7 +57,7 @@ package() {
 #   }
 #
 # Tag + push a release with:
-#   git tag v1.1.0 && git push origin v1.1.0
+#   git tag v2.0.0 && git push origin v2.0.0
 # ---------------------------------------------------------------------------
 
 # After install, each user runs:  hyprland-tts setup

@@ -6,13 +6,21 @@ time-to-first-audio, sentence-sized chunks afterwards, very short neighbours of 
 language merged, never across languages and never empty.
 """
 
-# Annotations stay lazy so no typing import is needed at runtime.
+# Postponed annotations let list[str] and X | None work on Python 3.9 too.
 from __future__ import annotations
 
 import re
 
 # Longest first chunk (characters) before it is cut at a clause boundary.
 FIRST_CHUNK_LIMIT = 90
+# The same limits for Chinese, Japanese and Korean text, where one character is a syllable
+# or word (about 4 characters per second), so the same count means far longer audio.
+FIRST_CHUNK_LIMIT_CJK = 30
+MAX_CHUNK_CJK = 60
+# Share of CJK characters above which a text is treated as CJK.
+CJK_SHARE = 0.4
+# Window (characters) in front of a period that is searched for an abbreviation.
+ABBREVIATION_WINDOW = 40
 # Shortest acceptable first-chunk piece, so "Ja," does not become a chunk of its own.
 FIRST_CHUNK_MINIMUM = 25
 # Chunks longer than this are wrapped at clause or word boundaries.
@@ -28,10 +36,18 @@ NON_TERMINAL_ABBREVIATIONS = frozenset(
 )
 # A boundary: sentence punctuation, closing quotes, whitespace, then a plausible start.
 SENTENCE_BOUNDARY = re.compile(
-    r"(?<=[.!?…])[\"'”»)\]]*\s+(?=[\"'“„«(\[]?[A-ZÀ-ÖØ-Þ¿¡0-9])"
+    r"(?<=[.!?…])(?P<closers>[\"'”»)\]]*)\s+(?=[\"'“„«(\[]?[A-ZÀ-ÖØ-Þ¿¡0-9])"
 )
-# Clause boundaries usable for cutting long sentences (position after the punctuation).
-CLAUSE_BOUNDARY = re.compile(r"(?<=[,;:])\s+|\s+(?=[–—-]\s)")
+# Clause boundaries usable for cutting long sentences (position after the punctuation);
+# CJK commas need no following space.
+CLAUSE_BOUNDARY = re.compile(r"(?<=[,;:])\s+|\s+(?=[–—-]\s)|(?<=[，、；：])")
+# CJK sentence ends (full stops, exclamation and question marks); a closing quote or bracket
+# that follows belongs to the sentence, and no space is needed afterwards.
+CJK_SENTENCE_END = re.compile(r"(?<=[。！？｡])(?![」』）”’])\s*|(?<=[。！？｡][」』）”’])\s*")
+# Han ideographs, kana, hangul and CJK punctuation.
+CJK_CHARACTER = re.compile(
+    r"[\u3000-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uff00-\uffef]"
+)
 # Any alphanumeric character; chunks without one are never emitted.
 HAS_CONTENT = re.compile(r"[^\W_]")
 
@@ -45,8 +61,8 @@ def ends_with_abbreviation(prefix: str) -> bool:
     Returns:
         True when splitting here would cut an abbreviation, initial or ordinal number.
     """
-    # Examine the last whitespace-separated token without its trailing periods.
-    tokens = prefix.split()
+    # Only the tail matters (abbreviations are short), which keeps long lines linear.
+    tokens = prefix[-ABBREVIATION_WINDOW:].split()
     last_token = tokens[-1].rstrip(".").lower() if tokens else ""
     # Single letters (initials) and one or two digit numbers (German ordinals) continue.
     is_initial = len(last_token) == 1 and last_token.isalpha()
@@ -69,15 +85,44 @@ def split_line(line: str) -> list[str]:
     start = 0
     for match in SENTENCE_BOUNDARY.finditer(line):
         # A period after "z. B." or "3." continues the sentence.
-        before = line[:match.start()]
+        before = line[max(0, match.start() - ABBREVIATION_WINDOW):match.start()]
         if before.endswith(".") and ends_with_abbreviation(before):
             continue
-        # Everything before the boundary is one finished sentence.
-        pieces.append(line[start:match.start()])
+        # The sentence keeps its closing quote or bracket; only the whitespace is dropped.
+        pieces.append(line[start:match.end("closers")])
         start = match.end()
     # The remainder after the last boundary is the final sentence.
     pieces.append(line[start:])
-    return [piece.strip() for piece in pieces if piece.strip()]
+    # CJK sentence ends need no space, so they are split in a second pass.
+    cjk_pieces = [part for piece in pieces for part in CJK_SENTENCE_END.split(piece)]
+    return [piece.strip() for piece in cjk_pieces if piece.strip()]
+
+
+def is_cjk(text: str) -> bool:
+    """Tell whether a text is mostly Chinese, Japanese or Korean.
+
+    Args:
+        text: Any text.
+
+    Returns:
+        True when CJK characters make up a large share of the non-space characters.
+    """
+    # Only a sample is counted, so a huge text costs no more than a short one.
+    sample = "".join(text[:400].split())
+    return bool(sample) and len(CJK_CHARACTER.findall(sample)) / len(sample) >= CJK_SHARE
+
+
+def chunk_limit(text: str) -> int:
+    """Return the longest chunk (characters) allowed for a text.
+
+    Args:
+        text: The text that is about to be chunked.
+
+    Returns:
+        ``MAX_CHUNK_CJK`` for CJK text, else ``MAX_CHUNK``.
+    """
+    # CJK characters carry much more audio each, so their chunks must be shorter.
+    return MAX_CHUNK_CJK if is_cjk(text) else MAX_CHUNK
 
 
 def split_sentences(text: str) -> list[str]:
@@ -107,9 +152,9 @@ def last_clause_cut(text: str, limit: int, minimum: int) -> int:
     Returns:
         Cut position, or 0 when no clause boundary qualifies.
     """
-    # Prefer the last boundary that still fits into the limit.
+    # Prefer the last boundary that still fits; only the window can contain one (linear time).
     best = 0
-    for match in CLAUSE_BOUNDARY.finditer(text):
+    for match in CLAUSE_BOUNDARY.finditer(text[:limit + 2]):
         # Boundaries after the limit cannot be used.
         if match.start() > limit:
             break
@@ -150,12 +195,12 @@ def cut_once(text: str, limit: int, minimum: int) -> tuple[str, str]:
     return text[:cut].strip(), text[cut:].strip()
 
 
-def wrap_long(text: str, limit: int = MAX_CHUNK) -> list[str]:
+def wrap_long(text: str, limit: int = 0) -> list[str]:
     """Wrap a long sentence into pieces of at most ``limit`` characters.
 
     Args:
         text: One sentence.
-        limit: Largest allowed piece length.
+        limit: Largest allowed piece length (0 = the limit that fits the script of the text).
 
     Returns:
         One or more non-empty pieces.
@@ -163,9 +208,10 @@ def wrap_long(text: str, limit: int = MAX_CHUNK) -> list[str]:
     # Keep cutting until the remainder fits.
     pieces: list[str] = []
     rest = text
+    limit = limit or chunk_limit(text)
     while len(rest) > limit:
         # Cut off a head piece and keep working on the rest.
-        head, rest = cut_once(rest, limit, FIRST_CHUNK_MINIMUM)
+        head, rest = cut_once(rest, limit, min(FIRST_CHUNK_MINIMUM, limit // 3))
         pieces.append(head)
     # The remainder is the last piece.
     pieces.append(rest)
@@ -181,11 +227,12 @@ def split_first_chunk(text: str) -> list[str]:
     Returns:
         The sentence unchanged when short, else a short head and the remainder.
     """
-    # Short sentences are already fast to synthesise.
-    if len(text) <= FIRST_CHUNK_LIMIT:
+    # Short sentences are already fast to synthesise (CJK ones are shorter by character count).
+    limit = FIRST_CHUNK_LIMIT_CJK if is_cjk(text) else FIRST_CHUNK_LIMIT
+    if len(text) <= limit:
         return [text]
     # Cut at a clause boundary (or word boundary) near the limit.
-    head, rest = cut_once(text, FIRST_CHUNK_LIMIT, FIRST_CHUNK_MINIMUM)
+    head, rest = cut_once(text, limit, min(FIRST_CHUNK_MINIMUM, limit // 3))
     return [head, rest] if rest else [head]
 
 
@@ -236,7 +283,8 @@ def can_merge(previous: tuple[str, str], current: tuple[str, str], is_first: boo
     if is_first or previous[0] != current[0]:
         return False
     # Only short sentences are glued on, and the result must fit the limit.
-    return len(current[1]) <= SHORT_SENTENCE and len(previous[1]) + 1 + len(current[1]) <= MAX_CHUNK
+    merged_length = len(previous[1]) + 1 + len(current[1])
+    return len(current[1]) <= SHORT_SENTENCE and merged_length <= chunk_limit(previous[1])
 
 
 def merge_short(items: list[tuple[str, str]]) -> list[tuple[str, str]]:

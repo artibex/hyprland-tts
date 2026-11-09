@@ -5,6 +5,22 @@ set -uo pipefail
 
 TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# detect_helper_python — export HTTS_PYTHON and HTTS_LID_MODEL when the helper venv exists.
+# Args:    none
+# Returns: 0 always
+# Globals: reads XDG_DATA_HOME, HTTS_PYTHON, HTTS_LID_MODEL; may export both
+detect_helper_python() {
+  local data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/hyprland-tts"
+  # Without this the 13 Python-path tests of the bash suites silently skip.
+  if [ -z "${HTTS_PYTHON:-}" ] && [ -x "$data_dir/venv/bin/python3" ]; then
+    export HTTS_PYTHON="$data_dir/venv/bin/python3"
+  fi
+  # The language model sits next to the venv after `deps install`.
+  if [ -z "${HTTS_LID_MODEL:-}" ] && [ -f "$data_dir/langid/lid.176.ftz" ]; then
+    export HTTS_LID_MODEL="$data_dir/langid/lid.176.ftz"
+  fi
+}
+
 # run_bash_suites — run all bash suites and count the failing ones.
 # Args:    none
 # Returns: 0 when every suite passed; 1 otherwise; stdout: each suite's output
@@ -31,10 +47,12 @@ run_python_suites() {
   [ -d "$TESTS_DIR/py" ] || return 0
   if ! command -v pytest >/dev/null 2>&1; then
     printf '\npytest not installed: skipping tests/py\n'
-    # Report even when nothing failed, so the log always ends with a verdict.
+    # CI sets REQUIRE_PYTEST=1 so that skipped Python tests can never pass unnoticed.
+    [ "${REQUIRE_PYTEST:-0}" != "1" ] || { printf 'REQUIRE_PYTEST=1: failing\n'; return 1; }
     return 0
   fi
   printf '\n##### pytest tests/py\n'
+  # Quiet output; failures still print in full.
   pytest -q "$TESTS_DIR/py"
 }
 
@@ -44,6 +62,7 @@ run_python_suites() {
 # Globals: none
 main() {
   local status=0
+  detect_helper_python
   # Both kinds always run so a bash failure still shows the Python result.
   run_bash_suites || status=1
   run_python_suites || status=1

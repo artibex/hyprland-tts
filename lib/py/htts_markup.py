@@ -11,7 +11,7 @@ middle of a line and turned "am 3. Oktober" into "am Oktober". ``lib/text.sh`` g
 the same fix so both paths stay identical.
 """
 
-# Annotations stay lazy so no typing import is needed at runtime.
+# Postponed annotations let list[str] and X | None work on Python 3.9 too.
 from __future__ import annotations
 
 # Regular expressions drive every rewrite rule in this module.

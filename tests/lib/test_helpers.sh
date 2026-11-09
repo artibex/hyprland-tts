@@ -145,7 +145,7 @@ test_setup() {
   export FAKE_TTS_LOG="$TEST_ROOT/fake-tts.jsonl" FAKE_TTS_CONTROL="$TEST_ROOT/fake-tts.control"
   export FAKE_PIPER_LOG="$TEST_ROOT/piper.log" FAKE_NOTIFY_LOG="$TEST_ROOT/notify.log"
   export FAKE_CODEC_LOG="$TEST_ROOT/codec.log" FAKE_SELECTION="$TEST_ROOT/selection.txt"
-  export FAKE_WAV="$TEST_ROOT/fake.wav" QWEN_START_TIMEOUT=20
+  export FAKE_WAV="$TEST_ROOT/fake.wav" QWEN_START_TIMEOUT=20 HTTS_KEEP_AUDIO=1
   mkdir -p "$HOME" "$XDG_DATA_HOME" "$XDG_CONFIG_HOME"
   # Forget any engine settings of the calling environment.
   unset ENGINE QWEN_VARIANT QWEN_DEVICE QWEN_SEED WORKER_IDLE_MINUTES WORKER_IDLE_SECONDS
@@ -198,7 +198,7 @@ htts() { "$TEST_REPO_DIR/bin/hyprland-tts" "$@"; }
 lib_eval() {
   bash -c 'set -euo pipefail; LIBDIR="$1"; HTTS_SELF="$2/bin/hyprland-tts"
     source "$LIBDIR/common.sh"
-    for m in text router model image keybind engine qwen3 qwen3_install worker voices player; do
+    for m in text router model image keybind engine qwen3 qwen3_install worker voices pyenv player setup hover; do
       source "$LIBDIR/$m.sh"; done
     load_config; eval "$3"' _ "$TEST_LIB" "$TEST_REPO_DIR" "$1"
 }
@@ -212,7 +212,7 @@ test_engine_tree() {
 }
 
 # test_install_fake_engine — create a fake installed engine (fake server, codec, dummy models).
-# Args:    $1 <variants to create, space separated; default "customvoice">
+# Args:    $1 <variants to create, space separated; default "customvoice">; the first is selected
 # Returns: 0 always
 # Globals: reads TEST_REPO_DIR
 test_install_fake_engine() {
@@ -228,6 +228,9 @@ test_install_fake_engine() {
     printf 'x' > "$tree/models/$(lib_eval "qwen3_model_file $variant")"
   done
   printf 'BUILD=vulkan\nDEVICE=Vulkan0\n' > "$tree/engine.conf"
+  # The product default is "base"; fixtures select the variant they install (first one wins).
+  local installed="${1:-customvoice}"
+  test_set_config "QWEN_VARIANT=${installed%% *}"
 }
 
 # test_set_config — write a raw line into the sandbox config file.

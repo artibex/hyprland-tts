@@ -158,3 +158,48 @@ def test_without_num2words_numbers_stay_as_digits(monkeypatch):
     assert htts_norm.normalize("Es kostet 5 Euro.", "de") == "Es kostet 5 Euro."
     # Abbreviations do not need number words and keep working.
     assert htts_norm.normalize("z. B. Äpfel", "de") == "zum Beispiel Äpfel"
+
+
+def test_giant_digit_strings_do_not_crash_the_normaliser():
+    """Numbers beyond Python's int conversion limit stay as digits instead of raising.
+
+    Returns:
+        None.
+    """
+    import htts_norm
+    # 5000 digits used to raise ValueError (exit 2 and a silent fall back to the bash path).
+    giant = "7" * 5000
+    for text in (f"Zahl {giant} Ende", f"Preis {giant},50 Euro", f"{giant}.5 und 3 Katzen"):
+        result = htts_norm.normalize(text, "de")
+        # The giant number is kept verbatim and the rest of the text is still normalised.
+        assert giant in result.replace(",", "").replace(".", "") or giant in result
+    assert "drei Katzen" in htts_norm.normalize(f"{giant}.5 und 3 Katzen", "de")
+
+
+def test_page_references_are_not_ordinals():
+    """A number after "S." or "Seite" is a page, not an ordinal, in German.
+
+    Returns:
+        None.
+    """
+    import htts_norm
+    # "S. 5. Fertig." used to become "S. fünfte Fertig." (the page treated as an ordinal).
+    assert htts_norm.normalize("Siehe S. 5. Fertig.", "de") == "Siehe S. fünf. Fertig."
+    assert "fünfte" not in htts_norm.normalize("Seite 5. Fertig.", "de")
+    # Real ordinals are unchanged.
+    assert htts_norm.normalize("Am 5. Oktober", "de") == "Am fünften Oktober"
+
+
+def test_international_phone_numbers_are_read_digit_by_digit():
+    """A +country number is spoken as plus and single digits; arithmetic is left alone.
+
+    Returns:
+        None.
+    """
+    import htts_norm
+    spoken = htts_norm.normalize("Ruf +49 30 1234567 an", "de")
+    # Every digit is its own word and the plus sign is spoken.
+    assert spoken.startswith("Ruf plus vier neun drei null eins")
+    assert "dreißig" not in spoken
+    # Short sums keep their normal number reading.
+    assert "plus" not in htts_norm.normalize("2 +3 = 5", "en").split("two")[0]

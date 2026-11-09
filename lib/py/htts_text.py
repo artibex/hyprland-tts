@@ -11,7 +11,7 @@ Exit codes: 0 success, 2 usage error, 3 language model or fastText unavailable (
 bash caller then falls back to its regex path).
 """
 
-# Annotations stay lazy so no typing import is needed at runtime.
+# Postponed annotations let list[str] and X | None work on Python 3.9 too.
 from __future__ import annotations
 
 import os
@@ -86,7 +86,7 @@ def write_stdout(text: str) -> None:
     """Write UTF-8 text to stdout.
 
     Args:
-        text: Text to print (a trailing newline is added when missing content exists).
+        text: Text to print; no newline is added, callers include their own.
 
     Returns:
         None.

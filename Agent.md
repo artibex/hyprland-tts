@@ -14,7 +14,8 @@ that is:
 
 - **Easy** — trigger speech on highlighted text with a single keyboard shortcut.
 - **Powerful** — multilingual, neural-quality voices, running 100% offline.
-- **Local & private** — no cloud, no telemetry, no background daemons.
+- **Local & private** — no cloud, no telemetry, no permanent daemon (the neural engine's worker
+  starts on demand, listens on 127.0.0.1 only and exits after an idle period).
 - **Installable & removable** — a clean AUR package the user can add or drop at will.
 - **Smart** — the user can, via keyboard shortcuts, go back/forward through the text,
   replay, and slow down or speed up playback while it is being read.
@@ -30,23 +31,49 @@ portable across Hyprland setups.
 
 ## 2. Architecture (as built)
 
-**One brain, thin skins.** All logic lives in the `lib/*.sh` modules, loaded by the thin
-dispatcher `bin/hyprland-tts`. The GUI and installers are *skins* that shell out to the
-CLI. Never duplicate logic into a skin — add a subcommand/flag and call it.
+**One brain, thin skins.** All logic lives in the `lib/*.sh` modules (plus the Python text
+helpers in `lib/py/`), loaded by the thin dispatcher `bin/hyprland-tts`. The GUI and installers
+are *skins* that shell out to the CLI. Never duplicate logic into a skin — add a
+subcommand/flag and call it. (The GUI reads the voice attribution/licence files for display
+and mirrors the voice-name rule only to enable a button; the CLI stays authoritative.)
 
 ### Modules (`lib/`, sourced by the dispatcher in this order)
 
 | Module | Responsibility |
 | --- | --- |
-| `common.sh` | XDG paths, tunables, config read/write, the **keybind action table** (`ACTION_*`), helpers (`log`/`die`/`have`). |
-| `text.sh` | `normalize_text` dispatches to `normalize_prose` or `normalize_code` (via `looks_like_code`), + `chunk_text` (sentence splitting). |
-| `router.sh` | `detect_lang` + `resolve_model` (fallback-voice + last-used) + `remember_model`. |
-| `model.sh` | Voice catalog + install / list / catalog / remove / default / **fallback** (+ all download security). |
+| `common.sh` | XDG paths, tunables (`ENGINE`, `QWEN_*`, `WORKER_IDLE_MINUTES`, …), config read/write (`set_config_var`), the **keybind action table** (`ACTION_*`), helpers (`log`/`die`/`have`/`notify`, `is_safe_name`, `json_escape`). |
+| `text.sh` | Bash text path: `normalize_text` → `normalize_prose` or `normalize_code` (via `looks_like_code`), + `chunk_text`. Used as the **fallback** when the Python helpers are unavailable. |
+| `router.sh` | `prepare_chunks` (raw text → `<lang>\t<sentence>` lines; Python helper first, bash regex fallback), first-chunk cut (≤90 chars), `detect_lang`, `resolve_model` (Piper voice chain: detected → fallback voice → last used → en → any). |
+| `model.sh` | Piper voice catalog + install / list / catalog / remove / default / **fallback** (+ all download security). |
 | `image.sh` | `read_clipboard_image` — exiftool metadata → tesseract OCR, graceful. |
 | `keybind.sh` | Generate `tts.conf` from the action table; `keybind list/set/check/reset`; conflict detection via `hyprctl binds -j`. |
-| `player.sh` | mpv-based smart player: `cmd_speak`, `speak_text` (shared with `hover`), `run_daemon`, `render_worker`, `cmd_ctl`, `cmd_stop`. |
+| `engine.sh` | Engine layer: `engine_selected/active/languages`, `engine_render` (Qwen3 first, **Piper safety net per chunk**, one notification per run), `piper_render`, `wav_finish` (calls `htts_wav.py`), `cmd_engine` (`status [--porcelain]`, `install`, `remove`, `use`, `variant`, `config idle`, `start`, `stop`). |
+| `qwen3.sh` | Qwen3 backend: pinned constants, install-tree paths, request building (`max_new_tokens` cap ∝ text length, optional seed), `qwen3_render` against the warm server, device selection, usability test. |
+| `qwen3_install.sh` | User-space install: pinned `qwentts.cpp` commit (verified after a shallow fetch), sha256-checked GGUF weights, Vulkan/CPU build (BLAS off), fetched Khronos headers when the system has none, flock-guarded. |
+| `worker.sh` | On-demand warm worker: flock-guarded start, loopback server on a random port, state in `$XDG_RUNTIME_DIR/hyprland-tts-worker` (0700), idle exit after `WORKER_IDLE_MINUTES`, `worker_ensure/kick/stop/status`. |
+| `voices.sh` | Per-language voice choice, cloned voices (`voice list/add/remove/set`), shipped + user voice roots, latent encoding via `qwen-codec`, registration with the running server. |
+| `pyenv.sh` | Optional Python helper environment: private venv + hash-pinned `fasttext-predict`/`num2words`, fastText model download (`deps install/status/remove`), interpreter resolution. Optional: older installs lack it. |
+| `player.sh` | mpv-based smart player: `cmd_speak`, `speak_text` (shared with `hover`), `run_daemon`, `render_worker`, `cmd_ctl`, `cmd_stop` (playback only). |
 | `setup.sh` | Idempotent Hyprland wiring: `setup` / `uninstall` / `purge`. |
 | `hover.sh` | `cmd_hover` — on-demand "speak text under the cursor" via `hyprctl cursorpos` + AT-SPI (`hover-read.py`, a non-sourced Python helper installed alongside the `lib/*.sh` modules). |
+
+Python helpers (`lib/py/`, run by the helper venv's interpreter; **not** sourced):
+
+| File | Responsibility |
+| --- | --- |
+| `htts_text.py` | CLI front end: `segment`, `detect`, `normalize`, `markup` (stdin → stdout; exit 3 = model/fastText unavailable → bash falls back). |
+| `htts_pipeline.py` | markup clean-up → sentences → language labels → normalisation → chunks. |
+| `htts_langid.py` | fastText `lid.176.ftz` restricted to the allowed languages + sentence smoothing. |
+| `htts_split.py`, `htts_markup.py` | Sentence splitting/chunk assembly; markdown and code clean-up. |
+| `htts_norm.py`, `htts_norm_numbers.py`, `htts_norm_tokens.py`, `htts_numbers.py`, `htts_lang_{de,en,fr,es,it}.py` | Per-language normalisation (numbers via `num2words`, dates, times, currency, units, abbreviations, acronyms, command lines). |
+| `htts_wav.py` | Standard-library WAV gate: silent / runaway detection and loudness normalisation (exit 0 ok, 3 silent, 4 runaway, 5 unreadable). |
+| `requirements.txt` | Pinned, hash-checked packages for `deps install`. |
+
+The GUI (`gui/hyprland-tts-gui`, GTK4/libadwaita, one file) has four pages — Engine, Voices,
+Language, Shortcuts — and only runs CLI commands (`engine …`, `voice …`, `deps …`, `model …`,
+`keybind …`). Short commands run on a worker thread (toast on completion); `engine install` and
+`deps install` run through `CliJob` (own process group, merged output streamed line by line into
+a log view, Cancel = SIGTERM to the group then SIGKILL after 3 s).
 
 The dispatcher resolves its lib dir from (in order) `$HYPRLAND_TTS_LIB`,
 `<self>/../lib/hyprland-tts` (installed), `<self>/../lib` (git checkout),
@@ -54,12 +81,25 @@ The dispatcher resolves its lib dir from (in order) `$HYPRLAND_TTS_LIB`,
 
 ### Playback pipeline (the important part)
 
+```
+selection ─► clean up (markdown; code per paragraph)
+          ─► normalise per language (numbers, dates, currency, abbreviations, CLI)   [Python helper]
+          ─► segment per sentence (fastText, smoothed) ─► "<lang>\t<sentence>" chunks
+          ─► engine_render picks the voice per chunk language
+               qwen3: warm worker on 127.0.0.1 ─► htts_wav.py gate (silent/runaway → retry, loudness)
+               piper: one-shot                  (also the per-chunk fallback; one notification)
+          ─► mpv playlist (append-play; instant next/prev/speed/pause over IPC)
+```
+
 `speak` → read `wl-paste --primary` (or `read_clipboard_image` if selection empty) →
-`normalize_text | chunk_text` → `resolve_model` → remember → launch detached `__daemon`.
+`engine_warm` (kicks the Qwen3 worker so loading overlaps text preparation) →
+`prepare_chunks` (Python helper; falls back to `normalize_text | chunk_text` + regex router when
+the venv/model are missing) → launch detached `__daemon`. The first chunk is ≤90 characters so
+speech starts early.
 
 `__daemon` starts **one mpv** in idle mode with an IPC socket
-(`--input-ipc-server`, `--audio-pitch-correction=yes`), renders each sentence **once** with
-Piper to a WAV, and `loadfile … append-play`s it to mpv's playlist. Controls are **native
+(`--input-ipc-server`, `--audio-pitch-correction=yes`), renders each chunk **once** through
+`engine_render` to a WAV, and `loadfile … append-play`s it to mpv's playlist. Controls are **native
 mpv IPC commands over the socket via `socat`** and are therefore instant and glitch-free:
 `next/prev` = playlist-next/prev, `faster/slower` = set speed (pitch preserved), `pause/
 toggle` = set/cycle pause, `restart` = seek 0. The daemon quits mpv once everything is
@@ -76,15 +116,85 @@ theoretical).
 
 - Models `~/.local/share/piper-tts/<lang>/<model>.onnx` (+ `.onnx.json`)
 - Last-used `~/.local/state/piper-tts/last-model`
-- Config `~/.config/piper-tts/config` (sourced bash: `VOICE_<lang>`, `FALLBACK_VOICE`,
-  `KEY_<action>`, `DEFAULT_SPEED`, `PIPER_BIN`, `MPV_BIN`)
+- Config `~/.config/piper-tts/config` (sourced bash, see the table below)
 - Runtime `$XDG_RUNTIME_DIR/hyprland-tts/` (mpv.sock, daemon.pid, chunks, s*.wav, render.done,
-  render.count)
+  render.count) — wiped on every speak
+- Worker state `$XDG_RUNTIME_DIR/hyprland-tts-worker/` (mode 0700: pid, port, ready, last-use,
+  lock, worker.log, server.log) — separate so a new speak cannot wipe it
+- Engines `~/.local/share/hyprland-tts/engines/qwentts/<commit>/` (`bin/`, models, `engine.conf`)
+- User voices `~/.local/share/hyprland-tts/voices/<name>/` (`ref.wav`, `ref.txt`, `ref.spk`,
+  `ref.rvq`, `LICENSE`); shipped voices `<prefix>/share/hyprland-tts/shipped-voices/<name>/` (read-only,
+  each with `ATTRIBUTION.md`)
+- Helper venv `~/.local/share/hyprland-tts/venv/`, model `~/.local/share/hyprland-tts/langid/lid.176.ftz`
 - Hyprland `~/.config/hypr/tts.conf` (generated; sourced from `hyprland.conf`)
+
+### Configuration keys (config file) and environment
+
+| Key | Default | Notes |
+| --- | --- | --- |
+| `ENGINE` | `auto` | `auto` / `qwen3` / `piper`. |
+| `QWEN_VARIANT` | `base` | `base` (cloned voices) / `customvoice` (presets); written by `engine install` / `engine variant`. |
+| `QWEN_VOICE_<lang>` | – | Voice per language (`voice set`); only 2–3 letter codes (shell variable names). |
+| `WORKER_IDLE_MINUTES` | `10` | `engine config idle <1-240>`. |
+| `DEFAULT_LANG` | `en` | Router default when detection finds nothing. |
+| `QWEN_DEVICE` | install's `engine.conf` | Override, e.g. `CPU`, `Vulkan0`. |
+| `QWEN_SEED` | random | Numeric sampling seed. |
+| `QWEN_START_TIMEOUT` / `QWEN_REQUEST_TIMEOUT` | 90 / 120 | Worker load / one-chunk limits (seconds). |
+| `QWEN_CODEC_DEVICE` | `CPU` | Device of the reference-clip encoder (`voice add`). |
+| `NORMALIZE_LOUDNESS` | `1` | `0` disables the `htts_wav.py` loudness step. |
+| `VOICE_<lang>`, `FALLBACK_VOICE`, `KEY_<action>`, `DEFAULT_SPEED`, `PIPER_BIN`, `MPV_BIN` | – | 1.x keys (Piper voices, shortcuts, tools). |
+
+Test seams and overrides (environment variables, none needed in normal use):
+
+| Variable | Purpose |
+| --- | --- |
+| `HYPRLAND_TTS_RUN_DIR` | Replace the player runtime directory (tests). |
+| `HYPRLAND_TTS_WORKER_DIR` | Replace the worker state directory (tests). |
+| `HYPRLAND_TTS_SYSTEM_VOICES` | Extra read-only voice root searched first (tests, custom installs). |
+| `WORKER_IDLE_SECONDS` | Idle limit in seconds, overrides `WORKER_IDLE_MINUTES` (tests). |
+| `HTTS_QWEN_ASSET_BASE` | Alternative weight download base URL (tests; `file://` and loopback http allowed only with it; hashes still enforced). |
+| `HTTS_TEST_ASSET_TABLE` | Alternative weight table `<role>|<file>|<sha256>` (tests with tiny fixture files). |
+| `HTTS_PYTHON` | Explicit interpreter for the text helpers (tests). |
+| `HTTS_LID_MODEL` | Explicit fastText model path (tests, packaging). |
+| `HTTS_DEPS_PYTHON` | Interpreter used to create the helper venv (e.g. a `python3.13`). |
+| `HTTS_PY_DIR` | Directory with the `htts_*.py` helpers (tests, odd layouts). |
+| `HYPRLAND_TTS_LIB`, `HYPRLAND_TTS_CLI`, `HYPRLAND_TTS_ALLOW_ROOT` | Library dir (dispatcher), CLI path (GUI), root-guard escape hatch (CI only). |
 
 ---
 
 ## 3. Feature status
+
+### 2.0 (branch `beta`; plan and research in `docs/PLAN-2.0.md`)
+
+- **Qwen3-TTS engine** — ✅ `engine.sh`/`qwen3.sh`/`qwen3_install.sh`/`worker.sh`. `ENGINE=auto`
+  uses Qwen3 when installed *and usable* (Base variant needs ≥1 cloned voice). Failed chunks fall
+  back to Piper with one notification per run; a dead worker is restarted once, then written off
+  for the run. Measured warm Vulkan (Radeon 680M): ready 1 s, RSS ≈1.2 GB, RTF 0.65–0.77, first
+  PCM 0.2 s; CPU Q8_0 RTF 1.1–1.4 (×10 worse under load), RSS 3.2–4.3 GB.
+- **On-demand worker** — ✅ binds 127.0.0.1 on a random port (**unauthenticated**: any local
+  process or a web page guessing the port can make it speak, never read data — documented in the
+  README privacy section), flock-guarded start (the spawned worker must not inherit the lock fd),
+  exits after `WORKER_IDLE_MINUTES`. `stop` = playback only; `engine stop` = worker.
+- **Engine install in user space** — ✅ ≈7 min, 2.2 GB; Vulkan or CPU auto-detected; pinned
+  commit + sha256 weights; Vulkan headers fetched locally when the system has none.
+- **Native cloned voices** — ✅ `voices.sh` + `share/voices/` (de-thorsten CC0, en-lj public
+  domain, fr-siwis CC-BY-4.0, es-mls-8585 + it-mls-8582 CC-BY-4.0, each with `ATTRIBUTION.md`);
+  user voices via `voice add`; per-language choice via `voice set`. Supported languages:
+  de/en/fr/es/it native; pt/ru/zh/ja/ko experimental (CJK sentence splitting is limited and the
+  list may shrink).
+- **Language ID + normalisation** — ✅ `lib/py/` via the helper venv (`deps install`): fastText
+  per sentence (smoothed), per-language normalisation, markdown/code clean-up. Falls back to the
+  bash/regex path when venv or model are missing. Known limitation: a very short sentence in
+  another language ("Hello world. Das ist ein Test.") is smoothed into its neighbours.
+- **Audio quality gate** — ✅ `htts_wav.py`: silence and runaway detection (retry), loudness
+  normalisation (`NORMALIZE_LOUDNESS`).
+- **GUI 2.0** — ✅ Engine / Voices / Language / Shortcuts pages; async install with log + cancel;
+  licence-consent gate for cloned voices; headless tests in `tests/gui/`.
+- **Pending / coming from the engine side** — `engine variant base|customvoice` (GUI "Switch
+  model" already calls it), a "loading voice…" notification while the worker loads, a selection
+  size cap. The README mentions all three; verify wording against the final CLI.
+
+### 1.x features (unchanged)
 
 - **Bug 1 (undetected language → last-used model)** — ✅ `router.sh::resolve_model`.
   Order: detected (DE→FR→ES→EN) → **explicit fallback voice** → last-used (if file exists)
@@ -217,10 +327,18 @@ theoretical).
   to `$startdir`) so `makepkg` works while iterating on `main`. The AUR release recipe
   (tag tarball + real `sha256sums` + release `package()`) is a commented block to swap in
   at publish time; then regenerate `.SRCINFO` with `makepkg --printsrcinfo > .SRCINFO`.
-- `depends`: `bash piper-tts-bin wl-clipboard mpv socat procps-ng curl gawk sed grep gtk4
-  libadwaita python-gobject`. `optdepends`: `hyprland`, `tesseract`(+`-data-eng`),
-  `perl-image-exiftool`, `at-spi2-core` (for `hover`). (GTK stack is a hard dep so
-  `hyprland-tts gui` always works; `alsa-utils` was dropped when playback moved to mpv.)
+- `depends`: `bash python piper-tts-bin wl-clipboard mpv socat procps-ng curl gawk sed grep
+  util-linux findutils gtk4 libadwaita python-gobject`. `optdepends`: `hyprland`,
+  `tesseract`(+`-data-eng`), `perl-image-exiftool`, `at-spi2-core` (for `hover`), `libnotify`,
+  `python-fasttext-predict` + `python-num2words` (AUR; else `deps install`), and the engine build
+  tools `cmake git gcc make shaderc vulkan-icd-loader` (+ optional `vulkan-headers`,
+  `spirv-headers`). (GTK stack is a hard dep so `hyprland-tts gui` always works; `alsa-utils` was
+  dropped when playback moved to mpv.)
+- Shipped voice packs install to `$PREFIX/share/hyprland-tts/shipped-voices/` (a separate name, so a
+  `PREFIX=$HOME/.local` install never mixes them into the user voice directory); `THIRD_PARTY.md` and
+  `CHANGELOG.md` install as optional docs. **Caveat:** with `PREFIX=$HOME/.local` (local
+  installer) that directory equals the user voice directory, so shipped voices are reported as
+  `user` voices (removable); the GUI therefore falls back to `ATTRIBUTION.md` for user voices.
 - `hover-read.py` installs alongside the `lib/*.sh` modules (`$LIBDIR/hover-read.py`,
   mode 755 — it's executed directly by `hover.sh`, not sourced like the `.sh` files).
 - Per-user wiring is `hyprland-tts setup`, never the package. `purge` removes user data.
@@ -332,15 +450,95 @@ theoretical).
   isolated. When testing this path, wrap `mpv` in a fakebin script that injects `--ao=null`
   before invoking the real binary — keeps real mpv IPC/playlist semantics (unlike a fully
   fake `mpv`) while never touching audio hardware or a live user's speakers.
+- **2.0 gotchas (don't reintroduce):**
+  - **`awk` early `exit`, `grep -m1`, `head` + `set -o pipefail` = random SIGPIPE failures.**
+    The producer is killed when the reader quits early; a function then fails "sometimes".
+    Read the whole stream (see `qwen3_asset_field`).
+  - **The spawned worker must not inherit the flock fd** (`9>&-` in `worker_kick`/spawn), or the
+    lock is held for the worker's whole life and every later start blocks.
+  - **`fn &` gives a subshell pid, not the server pid.** Record the real `tts-server` pid from
+    inside; `worker_pid_alive` also matches `/proc/<pid>/cmdline` against `__worker` to defeat
+    pid reuse.
+  - **`find_package(SPIRV-Headers CONFIG)` needs a cmake-installed prefix**, not a plain
+    checkout — the installer runs `cmake --install` for the fetched headers.
+  - **Upstream's `-DGGML_BLAS=ON` fails to link** (`cblas_sgemm`); the installer uses OFF.
+  - **GGML CPU threads spin-wait:** on a saturated CPU RTF went 1.4 → 12–14. Prefer Vulkan;
+    upstream has no thread flag (it uses cores/2).
+  - **Runaway generation:** a one-word input once produced 16 s of audio (no EOS). Always cap
+    `max_new_tokens` proportional to the text (`qwen3_max_frames`) and treat a render ≥80 % of the
+    cap as runaway (retry, then Piper).
+  - **Silent output:** 1 of 124 Vulkan runs returned all-zero samples under iGPU contention —
+    `htts_wav.py` gates peak < 0.01 and the render is retried with a new seed.
+  - **Qwen reads literally:** `1.250,75 Euro`, `Kfz`, `sudo pacman -Syu` come out garbled unless
+    normalised first. Never feed raw text to the neural engine when the helpers exist.
+  - **Speaker embeddings are talker-size specific** (0.6B: 4096 B, 1.7B: 8192 B); `.rvq` codec
+    tokens are shared. Packs hold the 0.6B encodings in `ref.*`.
+  - **`fasttext-predict` has no Python 3.14 wheel:** pip builds the sdist (needs g++). Use
+    `HTTS_DEPS_PYTHON=python3.13` or `gcc`.
+  - **PyPI `torchaudio` (pulled by `qwen-tts`) is the CUDA build** and fails to load; official
+    PyTorch path is RTF 9.6 anyway and is not used. `HF_HUB_OFFLINE=1` + repo id still calls the
+    API. bf16 on CPUs without AVX512-BF16 is ~4× slower than fp32.
+  - **Piper `it_IT-serena-high` crashes the installed `piper-tts`** (multi-character phoneme
+    "aɪ"); use `it_IT-paola-medium`.
+  - **Markdown list markers are stripped only at line start** (otherwise "am 3. Oktober" lost
+    its "3.").
+  - **The worker's HTTP port is unauthenticated** (127.0.0.1, random port). Never add an
+    endpoint that returns user data; keep it text → audio only.
+  - **Keep fixtures out of the user's data:** tests set `HOME`, `XDG_*`,
+    `HYPRLAND_TTS_WORKER_DIR`, `HYPRLAND_TTS_RUN_DIR` to temp dirs. Never test against the real
+    config, and never play audio (`--ao=null` wrapper for mpv, see above).
+  - **GUI tests must not claim the real application id.** A running `hyprland-tts-gui` (same
+    D-Bus id) turns a second `Adw.Application` in the test process into a *remote* instance and
+    the first `Adw.ApplicationWindow(...)` **segfaults**. `tests/gui` creates `TtsApp` with
+    `flags=Gio.ApplicationFlags.NON_UNIQUE` and its own id.
+  - **GUI widget traps:** `Adw.ActionRow` titles/subtitles parse Pango markup — set
+    `use_markup=False` for CLI text (`&`, `<`); `Adw.Toast` too. Programmatic `set_selected`
+    emits `notify::selected`: guard it (`_populating`) or connect after selecting. After an async
+    job ends, update button sensitivity immediately — do not wait for the status refresh.
+    `Adw.AlertDialog` (≥1.5) replaces the deprecated `Adw.MessageDialog`; `create_dialog` /
+    `present_dialog` cover both. The GUI cancels an install with `os.killpg` on the child's own
+    session (`start_new_session=True`), so build children die with it.
 - **XDG compliance**; **idempotent** setup (2× setup → 1 source line; uninstall → 0 refs).
 - **Keep core shortcuts as defaults** (`SUPER+A`, `SUPER+ESCAPE`); playback controls default
   to `SUPER+ALT+…`. Hover is intentionally not bound/shown in UI for now. Exposed
   shortcuts are user-rebindable via `keybind`.
-- **Update docs with code:** README (users) + this Agent.md (agents).
+- **Update docs with code:** README (users, incl. the troubleshooting section — every fix or
+  debug session documents its errors there), this Agent.md (agents), `CHANGELOG.md`,
+  `THIRD_PARTY.md` (licences/attribution) and `docs/PLAN-2.0.md` (status).
+- **Code standard (all code, enforced by the QA gate):** module docstring and a docstring (summary,
+  Args, Returns) on every def/class; an intent comment above every small group of statements (never
+  more than 3 uncommented statements in a row; no echo comments); meaningful names; lines ≤100;
+  small functions. Gates: `python3 tools/qa/qa-precheck.py . <files>`,
+  `python3 tools/qa/comment-runs.py <files>` (extension-based: the extensionless GUI script must
+  be checked through a `.py` copy/symlink), `uvx ruff check --line-length 100`.
 
 ---
 
 ## 6. Testing / Verification
+
+Exact commands:
+
+```bash
+make check                      # bash -n on every script, py_compile on every Python file
+make test                       # bash tests/run.sh: every tests/test_*.sh + pytest tests/py (if pytest exists)
+bash tests/test_engine_worker.sh   # a single bash suite
+python -m pytest tests/py -q    # text helpers (langid, normalisation, markup, split)
+python -m pytest tests/gui -q   # GUI, headless (see below)
+make qa                         # coding-standard gate
+```
+
+**GUI tests (`tests/gui/test_gui.py`, 70 tests).** The module is skipped when PyGObject, GTK4,
+libadwaita or `gtk4-broadwayd` are missing. It starts a private **Broadway** daemon
+(`gtk4-broadwayd :N`, `GDK_BACKEND=broadway`, `WAYLAND_DISPLAY`/`DISPLAY` removed) so no window can
+ever appear on the live desktop, imports `gui/hyprland-tts-gui` as a module and drives widgets
+programmatically on the GLib main loop. A **fake `hyprland-tts`** (written to a temp dir, selected
+via `HYPRLAND_TTS_CLI`) records every argv and file argument and replays canned porcelain/stderr
+(incl. hanging jobs for cancel and a SIGTERM-ignoring one for the SIGKILL escalation). Covered:
+porcelain parsing, page construction, button → argv mapping, async install log streaming, cancel
+(process group dead), close-during-install, error toasts, consent gating of `voice add`, temp-file
+cleanup, and a contract check against the real CLI in an isolated `HOME`. System Python with `gi`
+is `/usr/bin/python3`; if pytest is missing there:
+`uv venv --system-site-packages -p /usr/bin/python3 /tmp/v && uv pip install --python /tmp/v/bin/python pytest`.
 
 `make check` runs `bash -n` on the dispatcher + `py_compile` on the GUI. Manual checks use a
 scratch `$HOME` and fakes on `PATH`. Status of what's been exercised:
@@ -373,11 +571,10 @@ scratch `$HOME` and fakes on `PATH`. Status of what's been exercised:
   extension). *(Verified.)*
 - **Setup/uninstall** — idempotent wiring round-trip. *(Verified.)*
 - **Packaging** — `make install` layout (incl. `lib/`), and a real `makepkg` build. *(Verified.)*
-- **GUI** — `py_compile` + graceful no-GTK message. Not interactively clicked-through this
-  session (the dev box turned out to have a live Hyprland desktop — see below — but
-  popping a window on someone's live session mid-debugging wasn't the moment for it).
-  Still needs a real interactive smoke-test: Voices (install/remove/default/fallback),
-  Shortcuts (press-to-rebind, conflict dialog), custom-URL, failure paths → toast, no crash.
+- **GUI** — ✅ headless Broadway test suite (`tests/gui`, 70 tests, mutation-checked) plus a
+  smoke run of all four pages against the real CLI in an isolated `HOME`. **Not** click-through
+  tested on a real Wayland session (never pop windows on the live desktop): visual layout,
+  Wayland focus behaviour and the file chooser portal are unverified.
 - **Image reading** — logic only; needs a live Wayland clipboard to exercise end-to-end.
 - **GUI python3 resolution** — reproduced the exact failure on the dev box itself (its
   `PATH` python3 is mise-managed and lacks `gi`; `/usr/bin/python3` has it): confirmed the
@@ -418,7 +615,9 @@ in a test without restoring it, since that variable is also how GTK finds the co
   properly normalized regardless of the surrounding text's classification, and no
   double-punctuation at paragraph joins. *(Verified.)*
 
-Not yet run: clean-chroot `makepkg` + `namcap`; an actual interactive GUI click-through.
+Not yet run: clean-chroot `makepkg` + `namcap`; an interactive GUI click-through on a real
+Wayland session; a full Qwen3 install + speak on a second machine (verified on the reference box:
+install ≈7 min / 2.2 GB, warm Vulkan ready 1 s, RSS ≈1.2 GB, RTF 0.65–0.77, first PCM 0.2 s).
 
 ---
 
@@ -426,7 +625,14 @@ Not yet run: clean-chroot `makepkg` + `namcap`; an actual interactive GUI click-
 
 - Publish a tagged release; swap PKGBUILD to the release recipe + real `sha256sums`;
   regenerate `.SRCINFO`; run `namcap`.
-- Smoke-test the GUI and real audio playback on a Hyprland desktop.
+- Smoke-test the GUI and real audio playback on a Hyprland desktop (listen to the five shipped
+  voices: quality was judged by ASR error rate only, never by ear).
+- Land `engine variant`, the "loading voice…" notification and the selection size cap, then
+  verify README wording. Decide the fate of the experimental zh/ja/ko languages.
+- A CPU-only engine for machines without a usable GPU (Supertonic 3 measured RTF ≈0.23, 650 MB,
+  OpenRAIL-M model licence; Kyutai Pocket TTS slower and misreads digits).
+- Local-install voice root collision (see §4 caveat); `make qa` does not yet cover the GUI script
+  (extensionless) or `tests/gui`.
 - Consider: per-voice/per-language speed presets; a spoken "reading…" indicator;
   `shellcheck` in CI; a browser-extension bridge for true web alt-text.
 
@@ -441,14 +647,20 @@ hyprland-tts/
 ├── LICENSE
 ├── PKGBUILD / .SRCINFO              # AUR packaging (local-build by default)
 ├── Makefile                         # install static assets (PREFIX/DESTDIR)
+├── CHANGELOG.md / THIRD_PARTY.md    # release notes / licences and voice attribution
 ├── bin/hyprland-tts                 # thin dispatcher (resolves lib/, dispatches subcommands)
 ├── lib/                             # THE LOGIC
-│   ├── common.sh  text.sh   router.sh  model.sh
-│   ├── image.sh   keybind.sh player.sh  setup.sh
-│   └── hover.sh   hover-read.py     # on-demand cursor read (AT-SPI; not sourced, exec'd)
-├── gui/hyprland-tts-gui             # GTK4/libadwaita: Voices + Shortcuts (thin CLI front end)
+│   ├── common.sh  text.sh   router.sh  model.sh   image.sh   keybind.sh
+│   ├── engine.sh  qwen3.sh  qwen3_install.sh  worker.sh  voices.sh  pyenv.sh   # 2.0 engine layer
+│   ├── player.sh  setup.sh  hover.sh  hover-read.py   # hover: AT-SPI, not sourced, exec'd
+│   └── py/                          # htts_*.py text helpers + requirements.txt (helper venv)
+├── gui/hyprland-tts-gui             # GTK4/libadwaita: Engine, Voices, Language, Shortcuts (thin CLI front end)
 ├── share/
 │   ├── applications/hyprland-tts.desktop
+│   ├── voices/<name>/               # shipped voice packs (ref.wav/.txt/.spk/.rvq, ATTRIBUTION.md)
 │   └── tts.conf.sample              # reference copy (real file is generated)
+├── tests/                           # test_*.sh bash suites, lib/ helpers, py/ (pytest), gui/ (Broadway)
+├── tools/qa/                        # vendored coding-standard gate (qa-precheck.py, comment-runs.py)
+├── docs/PLAN-2.0.md                 # 2.0 plan, research numbers, work-package status
 ├── install-tts.sh / uninstall-tts.sh  # local (~/.local) installer for git-checkout users
 ```
