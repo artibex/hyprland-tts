@@ -460,6 +460,17 @@ Discord, Slack) do not unless their accessibility is switched on.
 
 Every problem below was hit for real while building the project.
 
+### Playback
+
+**Reading stops after a few seconds and the player just sits there (paused).** Found on the
+real Omarchy desktop, never in the `--ao=null` test runs: Arch's `mpv-mpris` package installs a
+system-wide `mpris.so` script, so every mpv registers as a desktop media player, and the
+Omarchy shell (quickshell) sent an MPRIS `Pause` to the reader's mpv about three seconds after
+it started (seen with `dbus-monitor "interface='org.mpris.MediaPlayer2.Player'"`). The player
+now starts mpv with `--load-scripts=no` (and `--keep-open=no`, so a user `mpv.conf` cannot break
+end-of-document detection). Media keys therefore do not control the reader; use the
+hyprland-tts shortcuts (`ctl pause|resume|toggle`).
+
 ### GUI and shortcuts
 
 **`hyprland-tts gui` says GTK4/libadwaita/PyGObject are missing, but they're installed.**

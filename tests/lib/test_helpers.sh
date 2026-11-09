@@ -89,8 +89,9 @@ test_make_fakebin() {
   local bin="$TEST_ROOT/fakebin" real_mpv
   real_mpv="$(command -v mpv)"
   mkdir -p "$bin"
-  # mpv keeps real IPC/playlist semantics but never opens an audio device.
-  printf '#!/bin/sh\nexec "%s" --ao=null "$@"\n' "$real_mpv" > "$bin/mpv"
+  # mpv keeps real IPC/playlist semantics but never opens an audio device; argv is logged.
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s/mpv-argv.log"\nexec "%s" --ao=null "$@"\n' \
+    "$TEST_ROOT" "$real_mpv" > "$bin/mpv"
   # Piper: log the call, then copy a valid WAV unless FAKE_PIPER_FAIL names an existing file.
   cat > "$bin/piper-tts" <<'FAKE'
 #!/usr/bin/env bash

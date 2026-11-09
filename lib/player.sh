@@ -325,8 +325,10 @@ daemon_start_mpv() {
     daemon_report_failure "runtime path too long: $MPV_SOCK"
     return 1
   fi
-  # Idle mode keeps one process alive across chunks; pitch correction keeps voices natural.
+  # One idle mpv for all chunks; no scripts, so a system mpris.so cannot let the desktop pause
+  # the reader (Agent.md, MPRIS); keep-open=no protects end detection from a user mpv.conf.
   "$MPV_BIN" --idle=yes --no-video --force-window=no --no-terminal \
+    --load-scripts=no --keep-open=no \
     --input-ipc-server="$MPV_SOCK" \
     --audio-pitch-correction=yes --speed="$DEFAULT_SPEED" >/dev/null 2>&1 &
   DAEMON_MPV_PID=$!

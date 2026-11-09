@@ -53,6 +53,9 @@ Neural engine, native voices per language, real language detection, full polish.
 
 ### Changed
 
+- The reader's mpv starts with `--load-scripts=no --keep-open=no`: a system `mpris.so`
+  (`mpv-mpris`) let the Omarchy shell pause the reader over MPRIS a few seconds into a document
+  (found on the live desktop; README troubleshooting *Playback*).
 - The player polls for the mpv socket and the daemon's pid file every 20 ms (was 50 ms): they sit
   on the path to the first sentence.
 - First chunk of a speak is at most 90 characters when it is rendered whole, so speech starts

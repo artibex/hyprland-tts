@@ -466,6 +466,13 @@ Test seams and overrides (environment variables, none needed in normal use):
   `Nameuser`, unpronounceable and confusing) — always `s/[()]/ /g` and let the whitespace
   tidy-up pass collapse runs. Caught in `normalize_code`; applies to any future text
   transform in `text.sh`.
+- **Never let the reader's mpv load scripts (MPRIS).** On the live Omarchy desktop the shell
+  (quickshell) sent `org.mpris.MediaPlayer2.Player.Pause` to the reader's mpv ~3 s into every
+  document, because `mpv-mpris` installs a system-wide `/etc/mpv/scripts/mpris.so`. Invisible in
+  tests (fake mpv, no session bus traffic). Fix: `--load-scripts=no` (+ `--keep-open=no` against
+  user configs) in `daemon_start_mpv`; `test_player.sh::case_mpv_ignores_desktop_media_control`
+  pins both flags. Diagnose with `dbus-monitor "interface='org.mpris.MediaPlayer2.Player'"` and
+  `GetConnectionUnixProcessID` on the sender.
 - **mpv's `loadfile … append` does not resume playback once mpv has gone idle — you need
   `append-play`.** Confirmed empirically against a live mpv instance: after mpv drains its
   playlist and reports `idle-active: true`, appending another file with plain `append`

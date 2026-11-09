@@ -215,4 +215,19 @@ test_worker_is_running() { [[ "$(htts engine status --porcelain)" == *"worker=ru
 # Globals: none
 test_status_has_two_items() { [[ "$(htts ctl status)" == *"/2 "* ]]; }
 
+# case_mpv_ignores_desktop_media_control — the reader's mpv loads no scripts (no MPRIS).
+# Args:    none
+# Returns: 0 always
+# Globals: reads TEST_ROOT
+case_mpv_ignores_desktop_media_control() {
+  test_add_piper_voice de
+  speak_and_wait "Ein kurzer Satz."
+  # Omarchy's shell paused the reader over MPRIS within seconds; mpris.so must stay unloaded.
+  assert_contains "$(cat "$TEST_ROOT/mpv-argv.log" 2>/dev/null)" "--load-scripts=no" \
+    "mpv starts without scripts"
+  # A user mpv.conf with keep-open=yes would break the idle-based end detection.
+  assert_contains "$(cat "$TEST_ROOT/mpv-argv.log" 2>/dev/null)" "--keep-open=no" \
+    "mpv keep-open is forced off"
+}
+
 test_run_cases
