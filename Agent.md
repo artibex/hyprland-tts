@@ -97,8 +97,9 @@ selection ─► clean up (markdown; code per paragraph)
 `speak` → read `wl-paste --primary` (or `read_clipboard_image` if selection empty) →
 `engine_warm` (kicks the Qwen3 worker so loading overlaps text preparation) →
 `prepare_chunks` (Python helper; falls back to `normalize_text | chunk_text` + regex router when
-the venv/model are missing) → launch detached `__daemon`. The first chunk is ≤90 characters so
-speech starts early.
+the venv/model are missing) → launch detached `__daemon`. The first chunk is ≤90 characters when
+it will not be streamed (speech starts after its render), and long (≤200, sentences merged into
+it) when it will be: see "Chunk ramp and streaming" below.
 
 `__daemon` starts **one mpv** in idle mode with an IPC socket
 (`--input-ipc-server`, `--audio-pitch-correction=yes`), renders each chunk **once** through
@@ -130,6 +131,26 @@ for `STREAM_IDLE_TIMEOUT` or ran past the runaway limit → the entry stays and,
 chunk, `stream_repair_entry` renders chunk 0 normally and swaps it in for replay
 (`loadfile … insert-at 0` + `playlist-remove 1`, skipped when mpv is on entry 0). Chunks ≥ 1 are
 rendered exactly as before while chunk 0 plays.
+
+**Chunk ramp and streaming.** The player asks `stream_wanted` *before* chunking (`speak_stream_flag`
+in `speak_start_document`; its inputs are config + install state, no worker needed) and passes the
+answer as the third argument of `prepare_chunks <allowed> <default> <1|0>` (Python helper:
+`segment --stream-first 1`; bash fallback: `use_chunk_ramp`). `1` selects `STREAMED_RAMP`
+(`htts_split.py`; `CHUNK_RAMP_STREAMED` in `router.sh`): chunk 0 ≤ 200 characters, whole sentences
+of the same language merge into it (`can_join` takes any length for chunk 0, ≤50 characters for
+later chunks) and a sentence that does not fit gives its opening clauses (`fill_first_chunk`, cut
+at a comma, ≥25 characters, remainder ≥15). Then the unchanged ramp 70, 78, 90, 105 … 220. Why: the
+server renders sequentially, so chunk 1 starts only when chunk 0 has been generated (≈0.62 s per
+audio second) and the pause before it is `gap_1 = 0.8·L1 − 0.38·L0 + 0.2 s` (L = audio seconds,
+~15–18 characters/s). It stays below 0.7 s for `len_1 ≤ 9 + 0.475·len_0`, i.e. chunk 1 = 70
+needs chunk 0 ≥ 128 characters; 200 leaves headroom for the ±20 % speech-rate spread
+(tests: `test_split.py::test_the_streamed_ramp_meets_the_gap_target…`). CJK keeps its third
+(first chunk ≤60, later ≤23…60). Not streamed (Piper, CPU build, `STREAM_FIRST_CHUNK=0`, missing
+helper) keeps the 90/70/78… ramp. If the decision and the daemon disagree (the stream fails with
+status 10 on a long chunk 0), `render_pieces` cuts chunk 0 into the short ramp (head ≤90, CJK
+scaled) and renders the pieces the classic way. Known limit: a chunk n+1 far longer than chunk n
+(e.g. a 45-character sentence before a 108-character one) still leaves a gap; limits are caps,
+not targets. Paragraph breaks are not boundaries for merging into chunk 0.
 
 > Why this design: the old `aplay` player re-ran Piper on every speed/skip action, and that
 > synthesis latency was the "painful stop" users hit. Rendering once + mpv playback removes
@@ -169,7 +190,7 @@ rendered exactly as before while chunk 0 plays.
 | `QWEN_START_TIMEOUT` / `QWEN_REQUEST_TIMEOUT` | 90 / 120 | Worker load / one-chunk limits (seconds). |
 | `QWEN_CODEC_DEVICE` | `CPU` | Device of the reference-clip encoder (`voice add`). |
 | `NORMALIZE_LOUDNESS` | `1` | `0` disables the `htts_wav.py` loudness step (and the gain of streamed chunks). |
-| `STREAM_FIRST_CHUNK` | `1` | `1` plays the first sentence while Qwen3 still generates it (GPU devices only; CPU builds never stream); `0` = render the whole chunk first. |
+| `STREAM_FIRST_CHUNK` | `1` | `1` plays the first chunk while Qwen3 still generates it (GPU devices only; CPU builds never stream) and chunks it long (≤200 characters); `0` = render a short first chunk (≤90) whole first. |
 | `STREAM_START_TIMEOUT` / `STREAM_IDLE_TIMEOUT` | 5 / 5 | Seconds a stream may wait for its first audio / for more audio before the chunk falls back to the normal render (first) or is kept as partial (later). |
 | `VOICE_<lang>`, `FALLBACK_VOICE`, `KEY_<action>`, `DEFAULT_SPEED`, `PIPER_BIN`, `MPV_BIN` | – | 1.x keys (Piper voices, shortcuts, tools). |
 
@@ -205,10 +226,10 @@ Test seams and overrides (environment variables, none needed in normal use):
   first audible audio ≈ 1.0 s warm (range 0.9–1.1 s over 6 runs; was 2.6 s, range 2.5–2.9 s over 6 runs) and 3.2–3.7 s cold (was 4.0–4.5 s). The remaining time is text preparation +
   daemon + mpv start (~0.36 s before the request is even sent), the server's first PCM
   (0.1–0.25 s warm) and mpv's raw-audio demuxer, which blocks until 12000 bytes (0.25 s of
-  audio) arrived. Chunks ≥ 1 are unchanged, so the **gap after the short first sentence is
-  governed by the size of chunk 1** (render RTF ≈ 0.8): a 5 s second chunk needs ≈ 4 s to
-  render, the first only plays ≈ 2 s — streaming moves the first sound earlier but not the
-  time at which chunk 1 is ready (see README troubleshooting).
+  audio) arrived. The **gap after the first chunk is governed by the sizes of chunk 0 and 1**
+  (formula in §2 "Chunk ramp and streaming"): with a short streamed first sentence it was
+  1.9–2.3 s; a long streamed first chunk (≤200 characters, sentences merged) brought it to
+  0.53–0.64 s (5 warm runs + 1 fresh, same text, README "Latency").
 - **On-demand worker** — ✅ binds 127.0.0.1 on a random port (**unauthenticated**: any local
   process or a web page guessing the port can make it speak, never read data — documented in the
   README privacy section), flock-guarded start (the spawned worker must not inherit the lock fd),
@@ -624,11 +645,11 @@ scratch `$HOME` and fakes on `PATH`. Status of what's been exercised:
 - **Keybind** — modmask math, combo split, `tts.conf` generation, and conflict detection
   against a fake `hyprctl binds -j` (blocks; `--force` overrides). *(Verified.)*
 - **First-chunk streaming** — `tests/test_stream.sh` (real mpv via the `--ao=null` wrapper, fake
-  server that streams PCM slowly and can stall, go silent, die, run away; 63 assertions: time to
+  server that streams PCM slowly and can stall, go silent, die, run away; 91 assertions: time to
   first append/audio, FIFO → regular file, prev/restart replay of the streamed chunk, stop
   mid-stream (no helper, FIFO, partial file; server told), stall/silence fallback without a second
   playlist entry, dying stream + repair swap, runaway cut, speed change mid-stream, learned
-  loudness per voice, CPU/Piper/missing-helper/off-switch keep the classic path, a new speak
+  loudness per voice, CPU/Piper/missing-helper/off-switch keep the classic path and the short first chunk, the long streamed first chunk and its split fallback, a new speak
   replacing a running stream) and `tests/py/test_stream.py` (18 tests: gain table, limiter, gate,
   FIFO/tee behaviour against a mpv-like reader, full runs against an in-process chunked server).
   Mutation-checked in scratch copies of the repo. *(Verified.)* Real-engine numbers: README

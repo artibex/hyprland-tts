@@ -159,9 +159,28 @@ position passed 0.1 s. Medians of the runs listed; the text is the six-chunk smo
 Where the remaining ~1 s goes (warm): about 0.3–0.4 s between the key press and the request
 (`speak`'s text preparation 0.15 s, then player and mpv start), 0.05 s starting the helper,
 0.1–0.25 s until the engine's first audio, 0.3 s until mpv has the 12000 bytes (0.25 s of audio)
-its raw-audio reader insists on, and the 0.1 s the measurement itself counts as played. Streaming applies to the **first sentence
-only**; later sentences are rendered while it plays, exactly as before. CPU builds and Piper
-keep the old behaviour (a CPU build is slower than real time, so a live stream would stutter).
+its raw-audio reader insists on, and the 0.1 s the measurement itself counts as played. Streaming applies to the **first chunk
+only**; later chunks are rendered while it plays. CPU builds and Piper keep the old behaviour
+(a CPU build is slower than real time, so a live stream would stutter) including the short
+90-character first chunk.
+
+**The pause after the first chunk.** The engine renders one chunk at a time, so chunk 2 only
+starts when chunk 1 has been generated (≈ 0.6 s per second of audio, while it plays for 1 s).
+With a short streamed first sentence nothing could hide that: the pause was about 1.9 s. Since
+a streamed first chunk starts playing after its first 0.25 s of audio whatever its length, it is
+now built long (up to 200 characters, 8–12 s of audio) and the second chunk is kept at 70
+characters. Same text, warm worker, real engine (medians of the runs; `speak` → mpv with a null
+audio output):
+
+| | Before (short first chunk) | After (long first chunk) |
+|---|---|---|
+| First sound, warm | 0.9 s (0.82–1.20 s, 4 runs) | 0.9 s (0.85–1.37 s, 6 runs) |
+| Pause after the first chunk | **2.2 s** (1.3–2.3 s) | **0.6 s** (0.53–0.64 s) |
+| Other pauses | 0.45–1.4 s | 0.45–0.65 s |
+| Whole two-paragraph text played | 24.6–25.5 s | 22.1–24.3 s |
+| One 122-character sentence | 2 chunks, 0.87 s pause | 1 chunk, no pause |
+
+The remaining 0.5–0.6 s between chunks is mpv opening the next file.
 
 ### Choosing an engine
 
@@ -260,7 +279,12 @@ What it does for every selection:
    voice and smoothed over neighbouring sentences. Measured: 99.5–100 % on whole texts
    (the old regex router: 60 %), 100 % per sentence on a held-out mixed-language set, 38 ms
    cold start, 2 MB model.
-4. **Chunk** into sentences; the first chunk is at most 90 characters so speech starts fast.
+4. **Chunk** into sentences. When the first sentence will be streamed (see *Latency*) the first
+   chunk is **long**, up to 200 characters with whole sentences merged into it, because its
+   length no longer delays the first sound and the audio it holds gives the engine time to
+   render the second chunk; then the chunks grow step by step (70, 78, 90 … 220 characters).
+   Without streaming (Piper, CPU builds, `STREAM_FIRST_CHUNK=0`) the first chunk is at most
+   90 characters so speech starts fast.
 
 **Fallback without the helpers:** if the venv or the model is missing the old bash/regex path
 takes over (German/French/Spanish/English detection from stop-words for the whole text, no
@@ -357,7 +381,7 @@ or GUI; every key below can also be set by hand.
 | `QWEN_REQUEST_TIMEOUT` | `120` | Seconds one chunk may take before it falls back to Piper. |
 | `QWEN_CODEC_DEVICE` | `CPU` | Device used to encode a cloned voice's reference clip. |
 | `NORMALIZE_LOUDNESS` | `1` | `1` = bring every chunk to one loudness; `0` = leave audio untouched. |
-| `STREAM_FIRST_CHUNK` | `1` | `1` = play the first sentence while Qwen3 is still generating it (GPU builds only); `0` = render the whole sentence first. |
+| `STREAM_FIRST_CHUNK` | `1` | `1` = play the first chunk while Qwen3 is still generating it (GPU builds only) and build it long (≤ 200 characters); `0` = render a short first chunk (≤ 90 characters) whole first. |
 | `STREAM_START_TIMEOUT` | `5` | Seconds the streamed first sentence may take to produce its first audio before it is rendered the normal way. |
 | `STREAM_IDLE_TIMEOUT` | `5` | Seconds without new audio mid-stream before the stream is given up (what was heard is kept). |
 | `VOICE_<lang>` | – | Default Piper voice per language (`model default`). |
@@ -515,14 +539,16 @@ not installed for the chosen variant, the Base model has no cloned voice, or the
 failed (you get one "Qwen3 unavailable" notification per speak, then Piper takes over). Look
 at `$XDG_RUNTIME_DIR/hyprland-tts-worker/worker.log` and `server.log`.
 
-**The first sentence starts early, but there is a longer pause before the second.** Streaming
-only moves the *first* sound earlier; the second sentence (up to 240 characters, about 5 s of
-audio) takes about 4 s to render while the first one plays for ~2 s, and it still starts at
-about the same moment as before (6.4 s vs 6.5 s after the shortcut in the smoke test). So the
-silence between sentence one and two grew from about 2 s to about 4 s while the speech began
-1.6 s sooner. From the third sentence on playback is as gapless as before (render time ≈ 0.8 ×
-audio time). If it bothers you, set `STREAM_FIRST_CHUNK=0`, or select text whose second sentence
-is short.
+**There is a pause after the first sentence.** The engine renders one chunk at a time and can
+only start the second chunk once it has finished generating the first, so the first chunk has to
+last long enough to cover that (see *Latency*). hyprland-tts therefore merges the first sentences
+(up to 200 characters) into the streamed first chunk and keeps the second chunk small. A pause of
+about 0.6 s remains (mpv opening the next file); a longer one means the first chunk could not be
+filled: a very short first sentence followed by one over 200 characters without a comma, or a
+machine that is slower than usual (check `htts_stream: ok … wall=` in the worker log: wall should
+stay below the audio length). If the worker cannot stream at all, the long first chunk is cut into
+short pieces and rendered the classic way, so speech still starts after about 2–3 s. Set
+`STREAM_FIRST_CHUNK=0` to return to the short first chunk.
 
 **How do I see whether the first sentence was streamed?** Look at the worker log
 (`$XDG_RUNTIME_DIR/hyprland-tts-worker/worker.log`):

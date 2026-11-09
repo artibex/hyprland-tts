@@ -31,7 +31,7 @@ def choose_default(allowed: tuple[str, ...], default_lang: str) -> str:
 
 
 def prepare(
-    raw: str, allowed: tuple[str, ...], default_lang: str, scorer=None
+    raw: str, allowed: tuple[str, ...], default_lang: str, scorer=None, stream_first: bool = False
 ) -> list[tuple[str, str]]:
     """Turn raw selected text into labelled, normalised chunks.
 
@@ -40,6 +40,7 @@ def prepare(
         allowed: Languages that have a voice (validated codes).
         default_lang: Language for sentences without evidence.
         scorer: Optional scoring function replacing fastText (tests).
+        stream_first: True when the player streams chunk 0 (it is then built long).
 
     Returns:
         ``(language, text)`` chunks ready for synthesis.
@@ -55,7 +56,7 @@ def prepare(
     labels = htts_langid.label_sentences(sentences, allowed, fallback, scorer)
     spoken = [(lang, htts_norm.normalize(text, lang)) for lang, text in zip(labels, sentences)]
     # Chunking works on the final text because normalisation changes its length.
-    return htts_split.build_chunks(spoken)
+    return htts_split.build_chunks(spoken, stream_first)
 
 
 def detect(raw: str, allowed: tuple[str, ...], default_lang: str, scorer=None) -> str:

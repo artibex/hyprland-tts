@@ -12,9 +12,15 @@
 
 # Languages the helper can always classify, even without an installed voice.
 DEFAULT_LANGS='de,en,fr,es,it'
-# Longest chunk (characters) by output position (0 = streamed first chunk); the last value
-# applies to every later chunk. Mirrors CHUNK_RAMP in lib/py/htts_split.py, see the model there.
+# Longest first chunk (characters) when it is not streamed; a longer one means "streamed".
+FIRST_CHUNK_LIMIT=90
+# Longest chunk by output position; the last value applies to every later chunk. Mirrors
+# CHUNK_RAMP and STREAMED_RAMP in lib/py/htts_split.py, see the model (and gap formula) there.
 CHUNK_RAMP=(90 70 78 90 105 120 140 160 185 220)
+# The same ramp with the long first chunk of a streamed run (it hides chunk 1's render time).
+CHUNK_RAMP_STREAMED=(200 70 78 90 105 120 140 160 185 220)
+# The ramp in force for this run; prepare_chunks selects it with use_chunk_ramp.
+ACTIVE_RAMP=("${CHUNK_RAMP[@]}")
 # Smallest sensible clause-boundary piece when cutting an over-long chunk.
 FIRST_CHUNK_MINIMUM=25
 # A chunk shorter than this is merged into a neighbour (every request costs about a second).
@@ -26,6 +32,8 @@ FALLBACK_LINE_MAX=2000
 # The chunks of one fallback run (language and text per position); see fallback_place.
 FALLBACK_LANGS=()
 FALLBACK_TEXTS=()
+# What is left of a sentence after the long first chunk took its opening clauses.
+FALLBACK_REST=""
 # The merged output list and the fragment waiting for its successor; see absorb_one.
 ABSORB_LANGS=()
 ABSORB_TEXTS=()
@@ -239,30 +247,65 @@ run_text_helper() {
 }
 
 # prepare_chunks_python — segment text with the Python helper.
-# Args:    $1 allowed languages (csv) | $2 default language | $3 raw text
+# Args:    $1 allowed languages (csv) | $2 default language | $3 raw text | $4 stream flag
 # Returns: 0 with chunk lines on stdout; 10 when Python, the venv or the model is missing;
 #          otherwise the helper's own exit code (3 = no language model)
 # Globals: none
 prepare_chunks_python() {
-  local allowed="$1" default_lang="$2" text="$3" python model=""
+  local allowed="$1" default_lang="$2" text="$3" stream_first="${4:-0}" python model=""
   python="$(pyenv_python)" || return 10
   # Several languages need the classifier model; a single language needs none.
   if [[ "$allowed" == *,* ]]; then
     model="$(langid_model_path)" || return 10
   fi
   printf '%s' "$text" | run_text_helper "$python" "$model" \
-    segment --allowed "$allowed" --default "$default_lang"
+    segment --allowed "$allowed" --default "$default_lang" --stream-first "$stream_first"
+}
+
+# use_chunk_ramp — select the ramp for this run: long first chunk when it will be streamed.
+# Args:    $1 stream flag ("1" = chunk 0 will be streamed; anything else = it will not)
+# Returns: 0 always
+# Globals: writes ACTIVE_RAMP
+use_chunk_ramp() {
+  # Only an explicit "1" from the player (stream_wanted) selects the long first chunk.
+  if [ "$1" = "1" ]; then
+    ACTIVE_RAMP=("${CHUNK_RAMP_STREAMED[@]}")
+  else
+    ACTIVE_RAMP=("${CHUNK_RAMP[@]}")
+  fi
+}
+
+# long_first_chunk — tell whether the ramp in force starts with the long streamed first chunk.
+# Args:    none
+# Returns: 0 for the streamed ramp; 1 for the short first chunk
+# Globals: reads ACTIVE_RAMP, FIRST_CHUNK_LIMIT
+long_first_chunk() {
+  [ "${ACTIVE_RAMP[0]}" -gt "$FIRST_CHUNK_LIMIT" ]
 }
 
 # ramp_limit — longest chunk allowed at an output position.
 # Args:    $1 position (0 = first chunk)
 # Returns: 0 always; stdout: the limit in characters
-# Globals: reads CHUNK_RAMP
+# Globals: reads ACTIVE_RAMP
 ramp_limit() {
-  local position="$1" last=$((${#CHUNK_RAMP[@]} - 1))
+  local position="$1" last=$((${#ACTIVE_RAMP[@]} - 1))
   # Positions beyond the ramp keep its largest value.
   [ "$position" -le "$last" ] || position="$last"
-  printf '%s' "${CHUNK_RAMP[$position]}"
+  printf '%s' "${ACTIVE_RAMP[$position]}"
+}
+
+# ramp_clause_cut — position of the last clause boundary (comma, semicolon, colon + space).
+# Args:    $1 window (the text that may hold the cut) | $2 smallest acceptable head length
+# Returns: 0 always; stdout: head length including the punctuation mark; 0 when none qualifies
+# Globals: none
+ramp_clause_cut() {
+  local head="${1%[,;:] *}"
+  # The head must be a real piece, and the window must hold a boundary at all.
+  if [ "$head" != "$1" ] && [ "$((${#head} + 1))" -ge "$2" ]; then
+    printf '%s' "$((${#head} + 1))"
+  else
+    printf '0'
+  fi
 }
 
 # ramp_cut — find where to cut a chunk that is over its limit (clause, else word boundary).
@@ -270,18 +313,14 @@ ramp_limit() {
 # Returns: 0 always; stdout: number of characters in the head piece
 # Globals: reads MIN_FRAGMENT, FIRST_CHUNK_MINIMUM
 ramp_cut() {
-  local text="$1" reach="$2" window head minimum
+  local text="$1" reach="$2" window head minimum cut
   # The remainder must not become a fragment, so the cut moves left when it would.
   [ $((${#text} - reach)) -ge "$MIN_FRAGMENT" ] || reach=$((${#text} - MIN_FRAGMENT))
   minimum=$((reach / 3 < FIRST_CHUNK_MINIMUM ? reach / 3 : FIRST_CHUNK_MINIMUM))
   window="${text:0:reach + 1}"
-  # Prefer the last clause boundary (comma, semicolon, colon + space) that leaves a real head.
-  head="${window%[,;:] *}"
-  if [ "$head" != "$window" ] && [ "$((${#head} + 1))" -ge "$minimum" ]; then
-    # The cut includes the punctuation mark so the clause stays intact.
-    printf '%s' "$((${#head} + 1))"
-    return 0
-  fi
+  # Prefer the last clause boundary that leaves a real head (the mark stays in the clause).
+  cut="$(ramp_clause_cut "$window" "$minimum")"
+  [ "$cut" -eq 0 ] || { printf '%s' "$cut"; return 0; }
   # Otherwise cut at the last space; a window without one is cut hard.
   head="${window% *}"
   [ "$head" != "$window" ] && [ "${#head}" -gt 0 ] || head="${window:0:reach}"
@@ -291,7 +330,7 @@ ramp_cut() {
 # fallback_wrap — print a sentence as pieces that each fit the ramp limit of their position.
 # Args:    $1 sentence | $2 position the first piece will have in the output
 # Returns: 0 always; stdout: one piece per line (no empty pieces)
-# Globals: reads CHUNK_RAMP via ramp_limit
+# Globals: reads ACTIVE_RAMP via ramp_limit
 fallback_wrap() {
   local text="$1" position="$2" limit cut
   limit="$(ramp_limit "$position")"
@@ -311,38 +350,70 @@ fallback_wrap() {
 
 # fallback_can_join — tell whether a sentence may be appended to the last chunk.
 # Args:    $1 language | $2 sentence
-# Returns: 0 for a short same-language sentence that fits the chunk's ramp limit; 1 otherwise
-# Globals: reads FALLBACK_LANGS, FALLBACK_TEXTS, SHORT_SENTENCE
+# Returns: 0 for a same-language sentence that fits the chunk's ramp limit (any sentence for the
+#          long streamed first chunk, only short ones for later chunks); 1 otherwise
+# Globals: reads FALLBACK_LANGS, FALLBACK_TEXTS, SHORT_SENTENCE, ACTIVE_RAMP
 fallback_can_join() {
   local lang="$1" sentence="$2" last=$((${#FALLBACK_TEXTS[@]} - 1)) joined
-  # The first chunk stays alone, and languages are never mixed.
-  [ "$last" -ge 1 ] && [ "${FALLBACK_LANGS[$last]}" = "$lang" ] || return 1
-  [ "${#sentence}" -le "$SHORT_SENTENCE" ] || return 1
+  # Nothing to join, or a language change.
+  [ "$last" -ge 0 ] && [ "${FALLBACK_LANGS[$last]}" = "$lang" ] || return 1
+  # A short first chunk stays alone; the long one takes any sentence; later ones short ones.
+  if [ "$last" -eq 0 ]; then
+    long_first_chunk || return 1
+  else
+    [ "${#sentence}" -le "$SHORT_SENTENCE" ] || return 1
+  fi
   # The result must still fit the limit of the chunk it extends.
   joined=$((${#FALLBACK_TEXTS[$last]} + 1 + ${#sentence}))
   [ "$joined" -le "$(ramp_limit "$last")" ]
 }
 
+# fallback_fill_first — move the opening clauses of a too-long sentence into the long first chunk.
+# Args:    $1 language | $2 sentence
+# Returns: 0 always; sets FALLBACK_REST to what is left of the sentence (all of it if untouched)
+# Globals: reads ACTIVE_RAMP, MIN_FRAGMENT, FIRST_CHUNK_MINIMUM; writes FALLBACK_TEXTS,
+#          FALLBACK_REST
+fallback_fill_first() {
+  local lang="$1" sentence="$2" reach cut=0 rest
+  FALLBACK_REST="$sentence"
+  # Only a long first chunk of the same language is topped up.
+  [ "${#FALLBACK_TEXTS[@]}" -eq 1 ] && [ "${FALLBACK_LANGS[0]}" = "$lang" ] && long_first_chunk ||
+    return 0
+  # The cut stays inside the free room and leaves a remainder that is no fragment.
+  reach=$((ACTIVE_RAMP[0] - ${#FALLBACK_TEXTS[0]} - 1))
+  [ "$reach" -le $((${#sentence} - MIN_FRAGMENT)) ] || reach=$((${#sentence} - MIN_FRAGMENT))
+  # A window below the minimum piece size has no useful clause boundary.
+  if [ "$reach" -ge "$FIRST_CHUNK_MINIMUM" ]; then
+    cut="$(ramp_clause_cut "${sentence:0:reach + 1}" "$FIRST_CHUNK_MINIMUM")"
+  fi
+  [ "$cut" -gt 0 ] || return 0
+  # The clauses move up; the rest loses the space it was cut at.
+  FALLBACK_TEXTS[0]+=" ${sentence:0:cut}"
+  rest="${sentence:cut}"
+  FALLBACK_REST="${rest#"${rest%%[![:space:]]*}"}"
+}
+
 # fallback_place — add one sentence to the chunk list, merged or wrapped along the ramp.
 # Args:    $1 language | $2 sentence
 # Returns: 0 always
-# Globals: writes FALLBACK_LANGS, FALLBACK_TEXTS
+# Globals: writes FALLBACK_LANGS, FALLBACK_TEXTS, FALLBACK_REST
 fallback_place() {
   local lang="$1" sentence="$2" piece last
-  # A short neighbour joins its predecessor instead of costing a request of its own.
+  # A neighbour that fits joins its predecessor instead of costing a request of its own.
   if fallback_can_join "$lang" "$sentence"; then
     last=$((${#FALLBACK_TEXTS[@]} - 1))
     # The sentence is glued to the end of the last chunk.
     FALLBACK_TEXTS[last]+=" $sentence"
     return 0
   fi
-  # Otherwise the sentence starts new chunks at the next ramp position(s).
+  # Otherwise the long first chunk is topped up and the rest starts new chunks on the ramp.
+  fallback_fill_first "$lang" "$sentence"
   while IFS= read -r piece; do
     # Pieces of quotes or punctuation only are noise.
     [[ "$piece" =~ [[:alnum:]] ]] || continue
     FALLBACK_LANGS+=("$lang")
     FALLBACK_TEXTS+=("$piece")
-  done < <(fallback_wrap "$sentence" "${#FALLBACK_TEXTS[@]}")
+  done < <(fallback_wrap "$FALLBACK_REST" "${#FALLBACK_TEXTS[@]}")
 }
 
 # absorb_push — append one chunk to the merged output list.
@@ -427,11 +498,13 @@ fallback_lang_for_chunk() {
 }
 
 # prepare_chunks_fallback — the old bash path: normalize_text | chunk_text + regex language.
-# Args:    $1 allowed languages (csv) | $2 default language; text on stdin
+# Args:    $1 allowed languages (csv) | $2 default language | $3 stream flag ("1" = long first
+#          chunk); text on stdin
 # Returns: 0 always; stdout: "lang<TAB>chunk" lines (no empty or punctuation-only chunks)
-# Globals: writes FALLBACK_LANGS, FALLBACK_TEXTS (reset first)
+# Globals: writes FALLBACK_LANGS, FALLBACK_TEXTS (reset first), ACTIVE_RAMP
 prepare_chunks_fallback() {
   local allowed="$1" default_lang="$2" chunk lang previous=""
+  use_chunk_ramp "${3:-0}"
   # A fresh run starts with an empty chunk list.
   FALLBACK_LANGS=()
   FALLBACK_TEXTS=()
@@ -462,14 +535,14 @@ helper_log_file() {
 }
 
 # prepare_chunks_try_python — run the Python path, keep its errors in a log, tell the user once.
-# Args:    $1 allowed languages | $2 default language | $3 raw text
+# Args:    $1 allowed languages | $2 default language | $3 raw text | $4 stream flag
 # Returns: 0 with chunk lines on stdout; 1 when the fallback must run
 # Globals: reads STATE_DIR, RUN_DIR
 prepare_chunks_try_python() {
   local status=0 log_path
   log_path="$(helper_log_file)"
   # Helper errors go to the log instead of being hidden.
-  prepare_chunks_python "$1" "$2" "$3" 2>> "$log_path" || status=$?
+  prepare_chunks_python "$1" "$2" "$3" "${4:-0}" 2>> "$log_path" || status=$?
   [ "$status" -ne 0 ] || return 0
   # 10 means "no Python or model here" and 3 "no language model" (both normal); the rest crashed.
   if [ "$status" -ne 10 ] && [ "$status" -ne 3 ]; then
@@ -480,22 +553,23 @@ prepare_chunks_try_python() {
 }
 
 # prepare_chunks — raw text on stdin -> "lang<TAB>sentence" lines, one chunk per line.
-# Args:    $1 allowed languages, comma-separated (e.g. de,en) | $2 default language (optional)
+# Args:    $1 allowed languages, comma-separated (e.g. de,en) | $2 default language (optional) |
+#          $3 stream flag (optional): "1" when the player will stream chunk 0, else it is short
 # Returns: 0 on success (also for empty input); 1 on an invalid language list
 # Globals: reads DEFAULT_LANGS via helpers; never loads a model for a single language
-# Notes:   First chunk <= 90 chars, then a growing ramp (CHUNK_RAMP); never merges across
-#          languages; falls back to regex.
+# Notes:   First chunk <= 90 chars (<= 200 and merged into when streamed), then a growing ramp
+#          (CHUNK_RAMP); never merges across languages; falls back to regex.
 prepare_chunks() {
-  local allowed="${1:-}" default_lang="${2:-}" text chunks
+  local allowed="${1:-}" default_lang="${2:-}" stream_first="${3:-0}" text chunks
   valid_lang_csv "$allowed" || { log "prepare_chunks: invalid language list '$allowed'"; return 1; }
   # A default outside the list would break the contract, so use the first allowed language.
   lang_in_csv "$default_lang" "$allowed" || default_lang="${allowed%%,*}"
   text="$(cat)"
   # Python path first; any failure (exit code 3 = no model, or a crash) uses the fallback.
-  if chunks="$(prepare_chunks_try_python "$allowed" "$default_lang" "$text")"; then
+  if chunks="$(prepare_chunks_try_python "$allowed" "$default_lang" "$text" "$stream_first")"; then
     [ -z "$chunks" ] || printf '%s\n' "$chunks"
     return 0
   fi
   # The Python path failed or is missing, so the regex/bash path runs.
-  prepare_chunks_fallback "$allowed" "$default_lang" <<< "$text"
+  prepare_chunks_fallback "$allowed" "$default_lang" "$stream_first" <<< "$text"
 }

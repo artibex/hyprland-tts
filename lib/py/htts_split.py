@@ -3,7 +3,9 @@
 Splitting is abbreviation-aware (``z. B.``, ``Dr.``, ordinal ``3.`` do not end a
 sentence). Chunk assembly produces what the player wants: a short first chunk for a low
 time-to-first-audio, sentence-sized chunks afterwards, very short neighbours of the same
-language merged, never across languages and never empty.
+language merged, never across languages and never empty. When the first chunk will be
+streamed (lib/stream.sh) it is long instead: streaming makes the first sound independent
+of its length, and the audio it holds hides the render time of the chunk after it.
 """
 
 # Postponed annotations let list[str] and X | None work on Python 3.9 too.
@@ -11,9 +13,12 @@ from __future__ import annotations
 
 import re
 
-# Longest first chunk (characters) before it is cut at a clause boundary. Chunk 0 is streamed
-# (lib/stream.sh), so its length sets how much audio the player has in hand for chunk 1.
+# Longest first chunk (characters) when it is NOT streamed: the first sound only arrives when
+# the whole chunk is rendered, so it is short (cut at a clause boundary beyond this).
 FIRST_CHUNK_LIMIT = 90
+# Longest first chunk when it IS streamed: the first sound no longer depends on its length,
+# and the more audio chunk 0 holds the more time chunk 1 has to render (see CHUNK_RAMP).
+STREAMED_FIRST_CHUNK_LIMIT = 200
 # The same limits for Chinese, Japanese and Korean text, where one character is a syllable
 # or word (about 4 characters per second), so the same count means far longer audio.
 FIRST_CHUNK_LIMIT_CJK = 30
@@ -26,13 +31,18 @@ ABBREVIATION_WINDOW = 40
 FIRST_CHUNK_MINIMUM = 25
 # Longest chunk at the end of the ramp; later chunks may be this long.
 MAX_CHUNK = 220
-# Longest chunk by position (0 = streamed first chunk); the last value applies to all later
-# chunks. Chunk n+1 is rendered while chunk n plays, so it must be ready in time: with a request
-# overhead of ~1.1 s, ~0.68 s render time per audio second and ~15 characters per second,
-# len_{n+1} <= (len_n - 16) / 0.68 (tests/py/test_split.py::test_ramp_*). Chunk 1 is the one
-# unavoidable gap (chunk 0 streams, so it cannot be hidden); it is kept near 70 characters
-# because the gap grows with len_1, then the limits climb to the ceiling.
+# Longest chunk by position; the last value applies to all later chunks. Chunk n+1 renders
+# while chunk n plays, so it must be ready in time: with a request overhead of ~1.1 s, ~0.68 s
+# render time per audio second and ~15 characters per second,
+# len_{n+1} <= (len_n - 16) / 0.68 (tests/py/test_split.py::test_ramp_*).
 CHUNK_RAMP = (FIRST_CHUNK_LIMIT, 70, 78, 90, 105, 120, 140, 160, 185, MAX_CHUNK)
+# The ramp for a streamed first chunk. The server is busy with chunk 0 until it has generated
+# it (~0.6 s per audio second, while it plays for 1 s), so chunk 1 starts late and the gap
+# before it is gap_1 = 0.8 * L1 - 0.38 * L0 + 0.2 s (L = audio seconds, ~15 characters per
+# second). It stays below 0.7 s when len_1 <= 9 + 0.475 * len_0: chunk 1 = 70 characters
+# needs a chunk 0 of >= 128 characters. The measured speech rate varies by +-20 % between
+# renders of one text (16-21 characters/s), so the limit leaves a margin of 70 characters.
+STREAMED_RAMP = (STREAMED_FIRST_CHUNK_LIMIT,) + CHUNK_RAMP[1:]
 # One CJK character carries about three times the audio of a Latin one.
 CJK_RAMP_DIVISOR = 3
 # A chunk shorter than this is merged into a neighbour: every chunk costs ~1 s of request overhead.
@@ -125,18 +135,20 @@ def is_cjk(text: str) -> bool:
     return bool(sample) and len(CJK_CHARACTER.findall(sample)) / len(sample) >= CJK_SHARE
 
 
-def limit_at(position: int, cjk: bool) -> int:
+def limit_at(position: int, cjk: bool, ramp: tuple[int, ...] = CHUNK_RAMP) -> int:
     """Return the longest chunk (characters) allowed at a chunk position.
 
     Args:
-        position: Index of the chunk in the output (0 = the streamed first chunk).
+        position: Index of the chunk in the output (0 = the first chunk).
         cjk: True for Chinese, Japanese or Korean text.
+        ramp: The limits by position (``CHUNK_RAMP``, or ``STREAMED_RAMP`` for a streamed
+            first chunk).
 
     Returns:
         The ramp limit; for CJK text one third of it, at most ``MAX_CHUNK_CJK``.
     """
     # Positions beyond the ramp keep its last (largest) value.
-    limit = CHUNK_RAMP[min(position, len(CHUNK_RAMP) - 1)]
+    limit = ramp[min(position, len(ramp) - 1)]
     # CJK characters carry much more audio each, so their chunks must be shorter.
     return min(MAX_CHUNK_CJK, limit // CJK_RAMP_DIVISOR) if cjk else limit
 
@@ -276,19 +288,20 @@ def wrap_long(text: str, limit: int = 0) -> list[str]:
     return wrap_with(text, lambda _index: fixed)
 
 
-def wrap_ramped(text: str, position: int) -> list[str]:
+def wrap_ramped(text: str, position: int, ramp: tuple[int, ...] = CHUNK_RAMP) -> list[str]:
     """Wrap a sentence along the chunk ramp, starting at a chunk position.
 
     Args:
         text: One sentence.
         position: Index the first piece will have in the output.
+        ramp: The limits by position.
 
     Returns:
         One or more non-empty pieces; piece ``i`` fits the limit of position ``position + i``.
     """
     # The ramp grows with every piece, so a long sentence starts small and ends large.
     cjk = is_cjk(text)
-    return wrap_with(text, lambda index: limit_at(position + index, cjk))
+    return wrap_with(text, lambda index: limit_at(position + index, cjk, ramp))
 
 
 def clean_chunk(text: str) -> str:
@@ -304,44 +317,97 @@ def clean_chunk(text: str) -> str:
     return " ".join(text.split())
 
 
-def can_join(chunks: list[tuple[str, str]], lang: str, sentence: str) -> bool:
+def long_first(ramp: tuple[int, ...]) -> bool:
+    """Tell whether a ramp starts with the long first chunk of a streamed run.
+
+    Args:
+        ramp: The limits by position.
+
+    Returns:
+        True when chunk 0 may exceed the short, non-streamed first-chunk limit.
+    """
+    # The ramps differ in their first step only.
+    return ramp[0] > FIRST_CHUNK_LIMIT
+
+
+def can_join(
+    chunks: list[tuple[str, str]], lang: str, sentence: str, ramp: tuple[int, ...] = CHUNK_RAMP
+) -> bool:
     """Decide whether a sentence may be appended to the last chunk.
 
     Args:
         chunks: The chunks built so far as ``(language, text)``.
         lang: Language of the sentence.
         sentence: The next sentence.
+        ramp: The limits by position.
 
     Returns:
-        True for a short sentence of the same language that still fits the limit of that chunk.
+        True for a sentence of the same language that still fits the limit of that chunk:
+        short ones for later chunks, any for the long streamed first chunk.
     """
-    # Nothing to join, a language change, or the first chunk (it stays short and alone).
-    if len(chunks) < 2 or chunks[-1][0] != lang:
+    # Nothing to join, a language change, or a short first chunk (it stays alone).
+    first_only = len(chunks) == 1
+    if not chunks or chunks[-1][0] != lang or (first_only and not long_first(ramp)):
         return False
-    # Only short sentences are glued on, and the result must fit the ramp limit of the chunk.
+    # The result must fit the ramp limit of the chunk it extends.
     previous = chunks[-1][1]
     merged_length = len(previous) + 1 + len(sentence)
-    limit = limit_at(len(chunks) - 1, is_cjk(previous))
-    return len(sentence) <= SHORT_SENTENCE and merged_length <= limit
+    fits = merged_length <= limit_at(len(chunks) - 1, is_cjk(previous), ramp)
+    # Later chunks only take short sentences; the long first chunk takes any that fits.
+    return fits and (first_only or len(sentence) <= SHORT_SENTENCE)
 
 
-def place_sentence(chunks: list[tuple[str, str]], lang: str, sentence: str) -> None:
+def fill_first_chunk(
+    chunks: list[tuple[str, str]], lang: str, sentence: str, ramp: tuple[int, ...]
+) -> str:
+    """Top up the long first chunk with the opening clauses of a sentence that does not fit.
+
+    Args:
+        chunks: The chunks built so far (the first one is extended in place).
+        lang: Language of the sentence.
+        sentence: A sentence that is too long to join the first chunk as a whole.
+        ramp: The limits by position.
+
+    Returns:
+        The rest of the sentence (all of it when nothing was moved).
+    """
+    # Only a long first chunk of the same language is topped up.
+    if len(chunks) != 1 or chunks[0][0] != lang or not long_first(ramp):
+        return sentence
+    # The cut stays inside the free room and leaves a remainder that is no fragment.
+    first = chunks[0][1]
+    room = limit_at(0, is_cjk(first), ramp) - len(first) - 1
+    reach = min(room, len(sentence) - min_fragment(sentence))
+    # No room, or no clause boundary in it, leaves the sentence for the next chunk.
+    cut = last_clause_cut(sentence, reach, FIRST_CHUNK_MINIMUM) if reach > 0 else 0
+    if not cut:
+        return sentence
+    # The clauses move up (a short first sentence is no reason for a long wait later).
+    chunks[0] = (lang, f"{first} {sentence[:cut].strip()}")
+    return sentence[cut:].strip()
+
+
+def place_sentence(
+    chunks: list[tuple[str, str]], lang: str, sentence: str, ramp: tuple[int, ...] = CHUNK_RAMP
+) -> None:
     """Append one sentence to the chunk list, merged or wrapped along the ramp.
 
     Args:
         chunks: The chunks built so far (extended in place).
         lang: Language of the sentence.
         sentence: Cleaned sentence text.
+        ramp: The limits by position.
 
     Returns:
         None.
     """
-    # A short neighbour joins its predecessor instead of costing a request of its own.
-    if can_join(chunks, lang, sentence):
+    # A neighbour that fits joins its predecessor instead of costing a request of its own.
+    if can_join(chunks, lang, sentence, ramp):
         chunks[-1] = (lang, f"{chunks[-1][1]} {sentence}")
         return
-    # Otherwise the sentence starts new chunks at the next ramp position(s).
-    pieces = wrap_ramped(sentence, len(chunks))
+    # Otherwise the long first chunk is topped up and the rest starts new chunks on the ramp.
+    sentence = fill_first_chunk(chunks, lang, sentence, ramp)
+    pieces = wrap_ramped(sentence, len(chunks), ramp)
     chunks.extend((lang, piece) for piece in pieces if HAS_CONTENT.search(piece))
 
 
@@ -407,22 +473,25 @@ def absorb_fragments(chunks: list[tuple[str, str]]) -> list[tuple[str, str]]:
     return merged + ([waiting] if waiting is not None else [])
 
 
-def build_chunks(items: list[tuple[str, str]]) -> list[tuple[str, str]]:
+def build_chunks(items: list[tuple[str, str]], stream_first: bool = False) -> list[tuple[str, str]]:
     """Turn labelled sentences into the final list of speakable chunks.
 
     Args:
         items: ``(language, sentence)`` pairs in reading order.
+        stream_first: True when chunk 0 will be streamed: it is then long (sentences merge
+            into it) because its length no longer delays the first sound.
 
     Returns:
-        ``(language, text)`` chunks: first one short, then a growing ramp, none empty, no
-        tabs or newlines, no fragments, languages never mixed.
+        ``(language, text)`` chunks: a short first one (a long one when streamed), then a
+        growing ramp, none empty, no tabs or newlines, no fragments, languages never mixed.
     """
     # Normalise whitespace and drop pieces without any letter or digit.
     cleaned = [(lang, clean_chunk(text)) for lang, text in items]
     meaningful = [(lang, text) for lang, text in cleaned if HAS_CONTENT.search(text)]
     # Sentences are placed one after the other so that every chunk knows its ramp position.
+    ramp = STREAMED_RAMP if stream_first else CHUNK_RAMP
     chunks: list[tuple[str, str]] = []
     for lang, sentence in meaningful:
-        place_sentence(chunks, lang, sentence)
+        place_sentence(chunks, lang, sentence, ramp)
     # Tiny chunks are merged away last, when all positions are known.
     return absorb_fragments(chunks)

@@ -80,11 +80,14 @@ selection ─► normalize (per language: numbers, dates, currency, abbreviation
 
 ## 4. Open items
 
-- Streaming leaves a longer pause after the short first sentence (the second chunk renders ≈ 4 s
-  while the first plays ≈ 2 s): make the router's second (and third) chunk shorter than 240
-  characters so the pipeline ramps up (not done; needs router tests and listening).
-- Land `engine variant base|customvoice`, the "loading voice…" notification and the selection size
-  cap (the GUI and README already refer to them).
+- ✅ Streaming left a longer pause after the short first sentence: fixed by a long streamed first
+  chunk (≤ 200 characters, sentences merged) and a ramp for the chunks after it; pause 2.2 s →
+  0.6 s on the reference box (README *Latency*, Agent.md "Chunk ramp and streaming"). Still open:
+  a short chunk followed by a much longer one leaves a gap (limits are caps, not targets), and
+  paragraph breaks are not boundaries when merging into chunk 0 — listen to it.
+- ✅ `engine variant base|customvoice` (`command_engine_variant`, `lib/engine.sh`), the
+  "loading voice…" notification (`engine_start_loading_notice`) and the selection size cap
+  (`SELECTION_MAX_CHARS`, `speak_limit_text`) are implemented in the CLI (wave 2).
 - zh/ja/ko: decide between dropping and limiting them (CJK sentence splitting); the documented
   support is de/en/fr/es/it, the rest experimental.
 - Listen to and approve the five shipped voices (judged by automatic transcription only).

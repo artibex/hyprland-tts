@@ -255,6 +255,88 @@ test_fallback_follows_the_ramp() {
   assert_match "$output" $'\n?de\tGuten Tag und herzlich willkommen\.\n' "fallback ramp: first sentence alone"
 }
 
+# test_streamed_ramp_limit_and_clause_cut — the streamed ramp and the clause-only cut helper.
+# Args:    none
+# Returns: 0 always
+# Globals: none
+test_streamed_ramp_limit_and_clause_cut() {
+  local window
+  use_chunk_ramp 1
+  assert_eq "200" "$(ramp_limit 0)" "streamed ramp: chunk 0 is long (it hides chunk 1's render)"
+  assert_eq "70" "$(ramp_limit 1)" "streamed ramp: chunk 1 keeps the small limit"
+  assert_eq "220" "$(ramp_limit 99)" "streamed ramp: positions beyond the table use the ceiling"
+  long_first_chunk
+  assert_rc 0 "$?" "long_first_chunk: true for the streamed ramp"
+  # Anything but "1" (also an empty flag) selects the short ramp again.
+  use_chunk_ramp x
+  assert_eq "90" "$(ramp_limit 0)" "short ramp: any flag but 1 keeps chunk 0 at 90"
+  long_first_chunk
+  assert_rc 1 "$?" "long_first_chunk: false for the short ramp"
+  # The clause cut returns the head including its mark, or 0 when nothing qualifies.
+  window="Eins zwei drei vier, fünf sechs sieben acht, neun zehn"
+  assert_eq "44" "$(ramp_clause_cut "$window" 10)" "clause cut: last boundary, mark included"
+  assert_eq "0" "$(ramp_clause_cut "$window" 50)" "clause cut: head below the minimum is refused"
+  assert_eq "0" "$(ramp_clause_cut "eins zwei drei" 1)" "clause cut: no boundary, no cut"
+}
+
+# test_fallback_streamed_first_chunk — the bash path builds the long first chunk when asked.
+# Args:    none
+# Returns: 0 always
+# Globals: none
+test_fallback_streamed_first_chunk() {
+  local output first sentence second
+  use_fallback
+  # Three of the four sentences fit chunk 0 (194 characters); the fourth is chunk 1.
+  sentence="Dies ist ein kurzer Test der neuen Sprachausgabe, die vollständig auf diesem Rechner läuft."
+  third="Wir prüfen, ob mehrere Sätze nacheinander sauber gesprochen werden."
+  output="$(printf 'Guten Tag und herzlich willkommen. %s %s Alles läuft lokal und ohne Netz.\n' \
+    "$sentence" "$third" | prepare_chunks de de 1)"
+  first="$(head -n1 <<< "$output" | cut -f2)"
+  assert_eq "Guten Tag und herzlich willkommen. $sentence $third" "$first" \
+    "fallback streamed: whole sentences merge into the long first chunk"
+  assert_eq "2" "$(wc -l <<< "$output")" "fallback streamed: the fourth sentence is chunk 1"
+  # Without the flag the same text keeps the short first chunk alone.
+  output="$(printf 'Guten Tag und herzlich willkommen. %s\n' "$sentence" | prepare_chunks de de 0)"
+  assert_match "$output" $'^de\tGuten Tag und herzlich willkommen\.\nde\tDies ist' \
+    "fallback not streamed: first sentence stays alone"
+  # A short heading plus a long sentence: chunk 0 is topped up at a clause boundary.
+  second="Dies ist ein langer Satz mit vielen Wörtern, der nicht in die erste Gruppe passt, weil er "
+  second+="sehr lang ist, und danach geht er noch weiter mit Nebensätzen, die sich hinziehen, "
+  second+="bis niemand mehr zuhört."
+  output="$(printf 'Kurz. %s\n' "$second" | prepare_chunks de de 1)"
+  first="$(head -n1 <<< "$output" | cut -f2)"
+  assert_match "$first" '^Kurz\. Dies ist .*,$' "fallback streamed: chunk 0 takes the opening clauses"
+  assert_le "${#first}" 200 "fallback streamed: chunk 0 within the streamed limit"
+  assert_eq "Kurz. $second" "$(cut -f2 <<< "$output" | paste -sd' ')" "fallback streamed: no text lost"
+  # Languages are never merged, not even into the long first chunk.
+  output="$(printf 'Das ist der erste Satz hier. The cat is on the table.\n' | prepare_chunks de,en de 1)"
+  assert_match "$output" $'en\tThe cat is on the table\.' "fallback streamed: other language stays separate"
+}
+
+# test_fallback_streamed_follows_the_streamed_ramp — limits per position, no fragments.
+# Args:    none
+# Returns: 0 always
+# Globals: none
+test_fallback_streamed_follows_the_streamed_ramp() {
+  local output position=0 lang text bad_limit=0 bad_fragment=0 first_length
+  use_fallback
+  output="$(ramp_text | prepare_chunks de de 1)"
+  use_chunk_ramp 1
+  while IFS=$'\t' read -r lang text; do
+    # One merged fragment may exceed the step by less than the fragment minimum.
+    [ "${#text}" -le "$(($(ramp_limit "$position") + MIN_FRAGMENT - 1))" ] ||
+      bad_limit=$((bad_limit + 1))
+    [ "$position" -eq 0 ] || [ "${#text}" -ge "$MIN_FRAGMENT" ] || bad_fragment=$((bad_fragment + 1))
+    [ "$position" -ne 0 ] || first_length="${#text}"
+    position=$((position + 1))
+  done <<< "$output"
+  assert_eq "0" "$bad_limit" "streamed fallback ramp: every chunk fits the limit of its position"
+  assert_eq "0" "$bad_fragment" "streamed fallback ramp: no fragment after the first chunk"
+  # The long first chunk is the point: well above the short limit, never above the streamed one.
+  assert_match "$first_length" '^(1[2-9][0-9]|200)$' "streamed fallback ramp: chunk 0 is long (120-200)"
+  use_chunk_ramp 0
+}
+
 # test_fallback_merges_fragments — tiny sentences join a neighbour of their own language.
 # Args:    none
 # Returns: 0 always
@@ -298,6 +380,33 @@ test_fallback_matches_python_chunking() {
   use_fallback
   via_bash="$(printf '%s\n' "$text" | prepare_chunks de de)"
   assert_eq "$via_python" "$via_bash" "comma-free text: bash fallback chunks exactly like Python"
+}
+
+# test_streamed_python_and_fallback_chunk_alike — both paths build the same long first chunk.
+# Args:    none
+# Returns: 0 always
+# Globals: none
+test_streamed_python_and_fallback_chunk_alike() {
+  local text via_python via_bash first_text
+  if ! python_available; then t_skip "streamed python/bash chunking parity"; return 0; fi
+  text="$(ramp_text)"
+  use_python
+  via_python="$(printf '%s\n' "$text" | prepare_chunks de de 1)"
+  use_fallback
+  via_bash="$(printf '%s\n' "$text" | prepare_chunks de de 1)"
+  assert_eq "$via_python" "$via_bash" "streamed ramp text: bash fallback chunks exactly like Python"
+  # The first chunk is long in the Python path too, and shorter without the flag.
+  first_text="$(head -n1 <<< "$via_python" | cut -f2)"
+  assert_match "${#first_text}" '^(1[2-9][0-9]|200)$' "streamed python: chunk 0 is long (120-200)"
+  use_python
+  first_text="$(printf '%s\n' "$text" | prepare_chunks de de 0 | head -n1 | cut -f2)"
+  assert_le "${#first_text}" 90 "python not streamed: chunk 0 stays at most 90"
+  # A comma-free sentence is the hardest case for the word cuts of the streamed ramp.
+  text="$(printf 'wort%03d ' {1..90})"
+  via_python="$(printf '%s\n' "$text" | prepare_chunks de de 1)"
+  use_fallback
+  via_bash="$(printf '%s\n' "$text" | prepare_chunks de de 1)"
+  assert_eq "$via_python" "$via_bash" "streamed comma-free text: bash fallback chunks exactly like Python"
 }
 
 # test_python_contract — the Python path emits a valid contract and normalised numbers.
@@ -443,9 +552,13 @@ main() {
   test_empty_and_noise_input
   test_ramp_limit_and_cut
   test_fallback_follows_the_ramp
+  test_streamed_ramp_limit_and_clause_cut
+  test_fallback_streamed_first_chunk
+  test_fallback_streamed_follows_the_streamed_ramp
   test_fallback_merges_fragments
   test_python_contract
   test_fallback_matches_python_chunking
+  test_streamed_python_and_fallback_chunk_alike
   test_python_single_language_needs_no_model
   test_python_missing_model_falls_back
   test_detect_lang

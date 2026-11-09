@@ -2,7 +2,9 @@
 """Command-line front end of the hyprland-tts text helpers (reads stdin, writes stdout).
 
 Commands:
-  segment --allowed de,en [--default de]   print ``lang<TAB>chunk`` lines
+  segment --allowed de,en [--default de] [--stream-first 1]
+                                           print ``lang<TAB>chunk`` lines (a long first
+                                           chunk with ``--stream-first 1``)
   detect  --allowed de,en [--default de]   print the dominant language code
   normalize --lang de                      print one text normalised for that language
   markup                                   print the markdown/code clean-up only
@@ -28,13 +30,13 @@ import htts_pipeline  # noqa: E402
 EXIT_USAGE = 2
 EXIT_NO_MODEL = 3
 USAGE = (
-    "usage: htts_text.py segment|detect --allowed de,en [--default de]\n"
+    "usage: htts_text.py segment|detect --allowed de,en [--default de] [--stream-first 1]\n"
     "       htts_text.py normalize --lang de\n"
     "       htts_text.py markup"
 )
 # Options accepted per command (flag name without dashes).
 COMMAND_OPTIONS = {
-    "segment": ("allowed", "default"),
+    "segment": ("allowed", "default", "stream-first"),
     "detect": ("allowed", "default"),
     "normalize": ("lang",),
     "markup": (),
@@ -100,7 +102,7 @@ def run_segment(options: dict[str, str]) -> int:
     """Run the ``segment`` command.
 
     Args:
-        options: Parsed options with ``allowed`` and optional ``default``.
+        options: Parsed options with ``allowed``, optional ``default`` and ``stream-first``.
 
     Returns:
         Exit code.
@@ -108,7 +110,9 @@ def run_segment(options: dict[str, str]) -> int:
     # Validate the language lists before any heavy work.
     allowed = htts_langid.parse_language_list(options.get("allowed", ""))
     default_lang = options.get("default", "").strip().lower()
-    chunks = htts_pipeline.prepare(read_stdin(), allowed, default_lang)
+    # The player says whether chunk 0 will be streamed; only "1" means yes.
+    stream_first = options.get("stream-first", "0").strip() == "1"
+    chunks = htts_pipeline.prepare(read_stdin(), allowed, default_lang, None, stream_first)
     # One line per chunk; tabs and newlines inside chunks were removed earlier.
     write_stdout("".join(f"{lang}\t{text}\n" for lang, text in chunks))
     return 0

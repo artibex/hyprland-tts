@@ -172,6 +172,19 @@ speak_default_lang() {
   printf '%s' "$first"
 }
 
+# speak_stream_flag — tell prepare_chunks whether chunk 0 will be streamed.
+# Args:    none
+# Returns: 0 always; stdout: "1" when the daemon will stream the first chunk, else "0"
+# Globals: reads what stream_wanted reads (config and install state, no worker needed)
+speak_stream_flag() {
+  # The same test the daemon repeats before chunk 0, so chunking and playback agree.
+  if stream_wanted; then
+    printf '1'
+  else
+    printf '0'
+  fi
+}
+
 # speak_limit_text — cut an extremely long selection and tell the user.
 # Args:    $1 <text>
 # Returns: 0 always; stdout: the text, shortened to SELECTION_MAX_CHARS when longer
@@ -218,8 +231,9 @@ speak_start_document() {
     # Clear the previous document but keep the lock file this subshell holds.
     find "$RUN_DIR" -mindepth 1 -maxdepth 1 ! -name .speak.lock -exec rm -rf -- {} +
     speak_notice_engine_choice
-    # The router yields "<lang><TAB><sentence>" lines; voices are picked per chunk later.
-    printf '%s' "$1" | prepare_chunks "$2" "$(speak_default_lang)" > "$CHUNKFILE"
+    # A streamed chunk 0 is built long (its length no longer delays the first sound).
+    printf '%s' "$1" | prepare_chunks "$2" "$(speak_default_lang)" "$(speak_stream_flag)" \
+      > "$CHUNKFILE"
     [ -s "$CHUNKFILE" ] || exit 0
     # setsid detaches the daemon from the keybind's process group; the subshell is the fallback.
     setsid -f "${HTTS_SELF:-$0}" __daemon >/dev/null 2>&1 < /dev/null 7>&- ||
@@ -398,12 +412,47 @@ run_daemon() {
   daemon_monitor
 }
 
+# render_pieces — split a first chunk that is long but could not be streamed.
+# Args:    $1 <language code>; $2 <text>; $3 <chunk index>
+# Returns: 0 always; stdout: the text pieces to render, one per line (one piece = unchanged)
+# Globals: reads FIRST_CHUNK_LIMIT; uses ramp_cut and fallback_wrap from router.sh
+render_pieces() {
+  local limit cut rest
+  # Only chunk 0 matters; CJK and Korean characters carry more audio each, so the limit shrinks.
+  limit=$((FIRST_CHUNK_LIMIT * 15 / $(qwen3_frames_per_char_tenths "$1")))
+  if [ "$3" -ne 0 ] || [ "${#2}" -le "$limit" ]; then
+    # Later chunks and short first chunks are rendered as they are.
+    printf '%s\n' "$2"
+    return 0
+  fi
+  # A long first chunk rendered whole would delay the first sound; a short head starts playback.
+  cut="$(ramp_cut "$2" "$limit")"
+  printf '%s\n' "${2:0:cut}"
+  # The rest follows the normal (short-first) ramp, so it is ready while the head plays.
+  rest="${2:cut}"
+  fallback_wrap "${rest#"${rest%%[![:space:]]*}"}" 1
+}
+
+# render_append — render one chunk and queue it in mpv.
+# Args:    $1 <language code>; $2 <text>; $3 <chunk index>
+# Returns: 0 when the chunk is queued; 1 when its rendering failed
+# Globals: reads RUN_DIR
+render_append() {
+  local wav
+  # Zero-padded names keep the playlist order readable in a directory listing.
+  wav="$RUN_DIR/s$(printf '%05d' "$3").wav"
+  engine_render "$1" "$2" "$wav" || return 1
+  # append-play (not append) resumes playback if mpv already drained and went idle; a dead mpv
+  # must not kill the renderer under set -e (the monitor ends with mpv anyway).
+  mpv_ipc "{\"command\":[\"loadfile\",\"$wav\",\"append-play\"]}" >/dev/null || true
+}
+
 # render_worker — render each chunk and append it to mpv's playlist (chunk 0 may stream).
 # Args:    none
 # Returns: 0 always
 # Globals: reads CHUNKFILE, RUN_DIR; writes COUNTFILE, DONEFILE
 render_worker() {
-  local index=0 lang text wav
+  local index=0 lang text piece
   # A failed engine start is not fatal: engine_render falls back to Piper per chunk.
   engine_prepare || true
   while IFS=$'\t' read -r lang text; do
@@ -413,14 +462,10 @@ render_worker() {
       index=1
       continue
     fi
-    # Zero-padded names keep the playlist order readable in a directory listing.
-    wav="$RUN_DIR/s$(printf '%05d' "$index").wav"
-    # append-play (not append) resumes playback if mpv already drained and went idle.
-    if engine_render "$lang" "$text" "$wav"; then
-      # A dead mpv must not kill the renderer under set -e; the monitor ends with mpv anyway.
-      mpv_ipc "{\"command\":[\"loadfile\",\"$wav\",\"append-play\"]}" >/dev/null || true
-      index=$((index + 1))
-    fi
+    # A long first chunk whose stream failed is rendered in short pieces, the head first.
+    while IFS= read -r piece; do
+      ! render_append "$lang" "$piece" "$index" || index=$((index + 1))
+    done < <(render_pieces "$lang" "$text" "$index")
   done < "$CHUNKFILE"
   # A first chunk that streamed only partly is replaced (for replay) before the run is complete.
   stream_repair_entry

@@ -12,6 +12,12 @@ ONE_SENTENCE='Das ist der erste Satz und er ist nicht lang.'
 TWO_PARAGRAPHS='Das ist der erste Satz und er ist nicht lang.
 
 This is the second paragraph and it is in English.'
+# Four German sentences: the first three (194 characters) form one streamed chunk 0.
+SAMPLE_TEXT='Guten Tag und herzlich willkommen. Dies ist ein kurzer Test der neuen Sprachausgabe, '
+SAMPLE_TEXT+='die vollständig auf diesem Rechner läuft. '
+SAMPLE_TEXT+='Wir prüfen, ob mehrere Sätze nacheinander sauber gesprochen werden. '
+SAMPLE_TEXT+='Alles läuft lokal und ohne Netz.'
+GREETING='Guten Tag und herzlich willkommen.'
 # Bytes of one fake frame (80 ms of 24 kHz s16le audio).
 FRAME_BYTES=3840
 
@@ -105,6 +111,31 @@ pcm_rms_db() {
   python3 -c 'import array, math, sys
 a = array.array("h"); a.frombytes(open(sys.argv[1], "rb").read())
 print("%.1f" % (10 * math.log10(sum(v * v for v in a) / len(a) / 32768.0 ** 2)))' "$1"
+}
+
+# chunk_line — print one line of the chunk file of the running document (language TAB text).
+# Args:    $1 <line number>
+# Returns: 0 always; stdout: the text without the language code
+# Globals: reads HYPRLAND_TTS_RUN_DIR
+chunk_line() { sed -n "${1}p" "$HYPRLAND_TTS_RUN_DIR/chunks" | cut -f2; }
+
+# chunk_count — count the chunks of the running document.
+# Args:    none
+# Returns: 0 always; stdout: the number of lines
+# Globals: reads HYPRLAND_TTS_RUN_DIR
+chunk_count() { wc -l < "$HYPRLAND_TTS_RUN_DIR/chunks" | tr -d ' '; }
+
+# assert_short_first_chunk — speak the sample text and check chunk 0 is the greeting alone.
+# Args:    $1 <what is under test>
+# Returns: 0 always
+# Globals: reads SAMPLE_TEXT, GREETING
+assert_short_first_chunk() {
+  echo "dur=1" > "$FAKE_TTS_CONTROL"
+  speak_text_now "$SAMPLE_TEXT"
+  assert_eq "$GREETING" "$(chunk_line 1)" "$1: chunk 0 is the short greeting"
+  assert_eq 5 "$(chunk_count)" "$1: the old short ramp (five chunks)"
+  test_wait_until 20 finished
+  assert_no_file "$HYPRLAND_TTS_RUN_DIR/s00000.pcm" "$1: nothing streamed"
 }
 
 # case_first_audio_precedes_end_of_synthesis — speech starts while the server still generates.
@@ -463,6 +494,83 @@ case_off_switch_and_missing_helper_keep_the_classic_path() {
   test_wait_until 20 finished
   assert_eq "wav" "$(request_formats)" "no stream without the helper file"
   assert_file "$HYPRLAND_TTS_RUN_DIR/s00000.wav" "normal entry"
+}
+
+# case_streamed_run_builds_a_long_first_chunk — the player tells prepare_chunks that chunk 0 streams.
+# Args:    none
+# Returns: 0 always
+# Globals: none
+case_streamed_run_builds_a_long_first_chunk() {
+  test_install_fake_engine
+  echo "dur=2 pcm_gap=0.05" > "$FAKE_TTS_CONTROL"
+  # The worker is not running yet: the decision rests on the install and the config alone.
+  speak_text_now "$SAMPLE_TEXT"
+  assert_eq "$(printf '%s' "$SAMPLE_TEXT" | sed 's/ Alles läuft.*//')" "$(chunk_line 1)" \
+    "chunk 0 holds three sentences when it will be streamed"
+  assert_eq "Alles läuft lokal und ohne Netz." "$(chunk_line 2)" "the fourth sentence is chunk 1"
+  assert_eq 2 "$(chunk_count)" "two chunks instead of five"
+  test_wait_until 20 finished
+  assert_eq "pcm wav" "$(request_formats)" "chunk 0 streamed, chunk 1 rendered"
+  assert_eq 2 "$(cat "$HYPRLAND_TTS_RUN_DIR/render.count")" "both chunks counted"
+}
+
+# case_failed_stream_of_a_long_first_chunk_is_rendered_in_pieces — no long wait after a failure.
+# Args:    none
+# Returns: 0 always
+# Globals: none
+case_failed_stream_of_a_long_first_chunk_is_rendered_in_pieces() {
+  test_install_fake_engine
+  # The stream (first request) is silent, so chunk 0 falls back to the normal render.
+  echo "silent_first=1 dur=1.6" > "$FAKE_TTS_CONTROL"
+  speak_text_now "$SAMPLE_TEXT"
+  test_wait_until 30 finished
+  # Chunk 0 comes as a head and two more pieces (the short ramp), then chunk 1: four files.
+  assert_eq "pcm wav wav wav wav" "$(request_formats)" "silent stream, then three pieces and chunk 1"
+  assert_eq 4 "$(cat "$HYPRLAND_TTS_RUN_DIR/render.count")" "the split chunk counts as three entries"
+  assert_file "$HYPRLAND_TTS_RUN_DIR/s00003.wav" "fourth entry exists"
+  assert_no_file "$HYPRLAND_TTS_RUN_DIR/s00000.pcm" "silent stream entry removed"
+  # The head ends at the comma (84 characters = 84 * 1.5 + 40 = 166 frames), below the 90 limit.
+  assert_eq "166" "$(test_speech_log | sed -n 2p | awk '{print $3}')" \
+    "head of the unstreamed chunk 0 is the short first chunk"
+}
+
+# case_off_switch_builds_the_short_first_chunk — STREAM_FIRST_CHUNK=0 keeps the old chunking.
+# Args:    none
+# Returns: 0 always
+# Globals: none
+case_off_switch_builds_the_short_first_chunk() {
+  test_install_fake_engine
+  test_set_config "STREAM_FIRST_CHUNK=0"
+  assert_short_first_chunk "switch off"
+}
+
+# case_cpu_build_builds_the_short_first_chunk — a CPU build never streams, so chunk 0 stays short.
+# Args:    none
+# Returns: 0 always
+# Globals: none
+case_cpu_build_builds_the_short_first_chunk() {
+  test_install_fake_engine
+  printf 'BUILD=cpu\nDEVICE=CPU\n' > "$(test_engine_tree)/engine.conf"
+  assert_short_first_chunk "cpu build"
+}
+
+# case_piper_builds_the_short_first_chunk — Piper never streams, so chunk 0 stays short.
+# Args:    none
+# Returns: 0 always
+# Globals: none
+case_piper_builds_the_short_first_chunk() {
+  test_add_piper_voice de
+  assert_short_first_chunk "piper"
+}
+
+# case_missing_helper_builds_the_short_first_chunk — without htts_stream.py nothing streams.
+# Args:    none
+# Returns: 0 always
+# Globals: none
+case_missing_helper_builds_the_short_first_chunk() {
+  test_install_fake_engine
+  rm -f "$TEST_LIB/py/htts_stream.py"
+  assert_short_first_chunk "missing helper"
 }
 
 # case_second_speak_replaces_a_running_stream — a new speak ends the old stream cleanly.

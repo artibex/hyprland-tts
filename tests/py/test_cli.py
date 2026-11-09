@@ -133,6 +133,33 @@ def test_chunks_follow_the_ramp_and_have_no_fragments(helper_script, number_word
     assert len(texts[1]) <= htts_split.CHUNK_RAMP[1]
 
 
+def test_stream_first_flag_builds_a_long_first_chunk(helper_script, number_words):
+    """``--stream-first 1`` merges the first sentences into a long chunk 0; ``0`` keeps it short.
+
+    Args:
+        helper_script: Path of htts_text.py.
+        number_words: Fixture that skips without num2words.
+
+    Returns:
+        None.
+    """
+    # Three short German sentences (194 characters): one chunk when streamed, else the first alone.
+    text = ("Guten Tag und herzlich willkommen. Dies ist ein kurzer Test der neuen Sprachausgabe, "
+            "die vollständig auf diesem Rechner läuft. Wir prüfen, ob mehrere Sätze nacheinander "
+            "sauber gesprochen werden.\n")
+    base = ["segment", "--allowed", "de", "--default", "de"]
+    streamed = run_helper(helper_script, [*base, "--stream-first", "1"], text)
+    short = run_helper(helper_script, [*base, "--stream-first", "0"], text)
+    assert streamed.returncode == 0 and short.returncode == 0
+    # The streamed first chunk holds all three sentences; the short one only the greeting.
+    first_streamed = streamed.stdout.decode().splitlines()[0].split("\t")[1]
+    first_short = short.stdout.decode().splitlines()[0].split("\t")[1]
+    assert first_streamed.endswith("gesprochen werden.") and first_short == "Guten Tag und herzlich willkommen."
+    # Anything but "1" (and the absent flag) means not streamed.
+    garbage = run_helper(helper_script, [*base, "--stream-first", "yes"], text)
+    assert garbage.stdout == short.stdout == run_helper(helper_script, base, text).stdout
+
+
 def test_no_empty_or_punctuation_only_chunks(helper_script, lid_model):
     """Decorative lines and symbols never become chunks.
 

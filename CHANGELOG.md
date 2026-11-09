@@ -55,7 +55,14 @@ Neural engine, native voices per language, real language detection, full polish.
 
 - The player polls for the mpv socket and the daemon's pid file every 20 ms (was 50 ms): they sit
   on the path to the first sentence.
-- First chunk of a speak is at most 90 characters, so speech starts faster.
+- First chunk of a speak is at most 90 characters when it is rendered whole, so speech starts
+  faster; when it will be streamed it is **long** (≤ 200 characters, whole sentences merged into
+  it, opening clauses of a longer sentence added) and followed by a growing ramp (70, 78, 90 …
+  220). The player decides before chunking (`prepare_chunks <allowed> <default> <1|0>`,
+  `htts_text.py segment --stream-first 1`) and a stream that fails on a long first chunk is
+  rendered as short pieces instead. Real engine, same text, warm: the pause after the first
+  chunk drops from ≈ 2.2 s to ≈ 0.6 s, first sound unchanged (≈ 0.9 s), total play time
+  −1 to −3 s (see README "Latency").
 - `stop` stops playback only; `engine stop` stops the warm worker.
 - Markdown list markers are stripped only at the start of a line (fixes "am 3. Oktober" losing
   the "3.").
