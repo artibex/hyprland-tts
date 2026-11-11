@@ -53,6 +53,11 @@ Neural engine, native voices per language, real language detection, full polish.
   Without `--engine` it uses the active engine; `--model` implies Piper and plays that installed
   voice (same language only) without changing the "last used" voice. Implementation:
   `lib/preview.sh`.
+- **Speak text from scripts**: `hyprland-tts say [--lang <code>] [--wait] [--] [<text>...]` reads
+  the given words (or stdin) through the normal player instead of the selection, so a script or an
+  assistant does not have to overwrite it. `--lang` fixes the language (checked against the
+  engine's voices), `--wait` returns once this reading has ended (finished, stopped or replaced);
+  quiet on success, errors on stderr. Implementation: `lib/say.sh`; tests `tests/test_say.sh`.
 - GUI, *Voices* page: a *Playback* group on top with a volume slider (applied after a short pause
   while dragging) and a Stop button; a ▶ preview button on every neural *voice per language* row
   (disabled when Qwen3 is not installed or the language has no voice) and on every installed Piper

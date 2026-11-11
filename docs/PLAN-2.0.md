@@ -82,6 +82,8 @@ selection ─► normalize (per language: numbers, dates, currency, abbreviation
      (`VOLUME`, live over mpv IPC, capped at 100), `hyprland-tts preview <lang>` (`lib/preview.sh`),
      GUI *Playback* group and ▶ buttons; mpv runs as `--audio-client-name=hyprland-tts`, so it no
      longer shares WirePlumber's stored `mpv` volume (fix for a silent/very quiet reader).
+   - ✅ **4f — speak text from scripts:** `hyprland-tts say [--lang <code>] [--wait] [<text>...]`
+     (`lib/say.sh`): words or stdin through the normal player, without touching the selection.
    - 🔄 **4a — coding standards for every script, bash/pytest suites, CI (shellcheck, tests, QA
      gate):** tracked by the engine/bash polish work (`tools/qa`, `make qa`).
 

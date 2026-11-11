@@ -54,10 +54,11 @@ and mirrors the voice-name rule only to enable a button; the CLI stays authorita
 | `stream.sh` | First-chunk streaming: `stream_wanted`, `stream_first_chunk` (FIFO entry in mpv + `htts_stream.py` pump), `stream_settle` (fallback / partial), `stream_repair_entry`. Called only from `render_worker`. |
 | `voices.sh` | Per-language voice choice, cloned voices (`voice list/add/remove/set`), shipped + user voice roots, latent encoding via `qwen-codec`, registration with the running server. |
 | `pyenv.sh` | Optional Python helper environment: private venv + hash-pinned `fasttext-predict`/`num2words`, fastText model download (`deps install/status/remove`), interpreter resolution. Optional: older installs lack it. |
-| `player.sh` | mpv-based smart player: `cmd_speak`, `speak_text <text> [<lang list>]` (shared with `hover` and `preview`; the optional list fixes the languages, skipping detection), `run_daemon`, `render_worker`, `cmd_ctl`, `cmd_stop` (playback only), `volume_valid`/`playback_volume`/`cmd_volume` (`volume [<0-100>]`, live over IPC). |
+| `player.sh` | mpv-based smart player: `cmd_speak`, `speak_text <text> [<lang list>]` (shared with `hover`, `preview` and `say`; the optional list fixes the languages, skipping detection), `run_daemon`, `render_worker`, `cmd_ctl`, `cmd_stop` (playback only), `volume_valid`/`playback_volume`/`cmd_volume` (`volume [<0-100>]`, live over IPC). |
 | `setup.sh` | Idempotent Hyprland wiring: `setup` / `uninstall` / `purge`. |
 | `hover.sh` | `cmd_hover` — on-demand "speak text under the cursor" via `hyprctl cursorpos` + AT-SPI (`hover-read.py`, a non-sourced Python helper installed alongside the `lib/*.sh` modules). |
 | `preview.sh` | Voice preview: sample sentences per language (associative array), `preview_sentence`, `cmd_preview` (`preview <lang> [--engine qwen3\|piper] [--model <lang>/<name>]`): exports `HYPRLAND_TTS_ENGINE` / `HYPRLAND_TTS_PIPER_MODEL` for the detached `__daemon` and calls `speak_text` with the one language. |
+| `say.sh` | `cmd_say` (`say [--lang <code>] [--wait] [--] [<text>...]`): text from the words or stdin (`say_read_text`) → `speak_text` (detection, or the one `--lang` language checked by `say_check_lang` → `preview_check_engine`); `--wait` polls `daemon_pid_valid` on the pid this call started (`say_wait_for_end`, every 0.2 s), so it also ends on `stop` or a replacing speak. Quiet on success. |
 
 Python helpers (`lib/py/`, run by the helper venv's interpreter; **not** sourced):
 
@@ -262,6 +263,8 @@ Test seams and overrides (environment variables, none needed in normal use):
 - **Voice preview** — ✅ `preview.sh::cmd_preview`: sample sentence for de en fr es it pt ru zh ja
   ko through the normal player, language fixed; `--engine` / `--model` via the env overrides in §2;
   GUI ▶ buttons on the neural voice-per-language rows and installed Piper voices.
+- **Speak text from scripts** — ✅ `say.sh::cmd_say`: words or stdin through `speak_text` (never the
+  selection), optional fixed `--lang`, `--wait` until this daemon is gone; for assistants/scripts.
 - **Own audio identity (real-world fix)** — ✅ the reader was silent/very quiet: as plain `mpv` it
   shared WirePlumber's stored volume with every mpv on the system (see §5).
 - **Pending / coming from the engine side** — `engine variant base|customvoice` (GUI "Switch
@@ -712,6 +715,12 @@ scratch `$HOME` and fakes on `PATH`. Status of what's been exercised:
   `test_player.sh` (mpv argv carries `--audio-client-name=hyprland-tts` and `--volume`; `volume 40`
   changes a live reader) and `test_preview.sh` (forced language/engine/voice, error paths); the
   real mixer entry is a manual check after a change: `pactl list sink-inputs` while it speaks.
+- **`say`** — `tests/test_say.sh` (real mpv via the `--ao=null` wrapper, fake server/Piper): words
+  and stdin spoken with the detected language, `-`, `--lang` (forces German on English text, refuses
+  a language without a voice), whitespace/empty stdin and unknown options refused without a player,
+  `--` before dash text, quiet stdout, no wait without `--wait`, `--wait` until the daemon is gone,
+  ended by `stop` or by a replacing `say`. Fake readings stay below the runaway limit (`dur` < 80 %
+  of the frame cap ≈ 6.8 s for a 45-character sentence). Mutation-checked. *(Verified.)*
 - **`append-play` fix + `COUNTFILE` completion check** — reproduced the actual bug with a
   fake Piper that deliberately sleeps 2.5s on one chunk out of three, and an authoritative
   timestamped log of real synthesis start/end times cross-referenced against `ctl status`
@@ -810,6 +819,7 @@ hyprland-tts/
 │   ├── stream.sh                    # first-chunk streaming (FIFO entry + htts_stream.py pump)
 │   ├── player.sh  setup.sh  hover.sh  hover-read.py   # hover: AT-SPI, not sourced, exec'd
 │   ├── preview.sh                   # voice preview (sample sentences, cmd_preview)
+│   ├── say.sh                       # `say`: speak text from the words or stdin (cmd_say)
 │   └── py/                          # htts_*.py text helpers + requirements.txt (helper venv)
 ├── gui/hyprland-tts-gui             # GTK4/libadwaita: Engine, Voices, Language, Shortcuts (thin CLI front end)
 ├── share/

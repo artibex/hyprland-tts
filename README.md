@@ -40,6 +40,9 @@ engine stays as a fast fallback. 100% offline: no cloud, no telemetry, no perman
   on top of the system volume, live while it speaks.
 - **Voice preview** — `hyprland-tts preview <lang>` (or the ▶ buttons in the GUI) speaks a
   sample sentence with the voice a language would get, or with one installed Piper voice.
+- **Speak text from scripts** — `hyprland-tts say` reads words or stdin aloud through the same
+  player (optionally in a fixed language, optionally waiting until it has finished), without
+  touching your selection.
 - **Voiceover text cleanup** — markdown, decorative symbols and stray markup are removed;
   **source code gets its own cleanup** (operators become words, identifiers are split,
   braces become pauses). Classified per paragraph.
@@ -283,6 +286,27 @@ voice for the engine, `--engine qwen3` when Qwen3 is not usable, and a model of 
 In the GUI every neural *voice per language* row and every installed Piper voice has a ▶ button
 (the neural one is disabled when Qwen3 is not installed or the language has no voice).
 
+### Speak text from scripts
+
+`hyprland-tts say` reads text given to it instead of the selection, so a script or an assistant
+can speak without touching what you highlighted. The words are joined with single spaces; with no
+words (or a single `-`) it reads all of stdin. It uses the normal player: volume, speed, the stop
+shortcut, the length limit (`SELECTION_MAX_CHARS`) and the Piper fallback apply, and a new `say` or
+`speak` replaces a reading in progress.
+
+```bash
+hyprland-tts say "Der Build ist fertig."                    # detected language, returns at once
+printf '%s' "$text" | hyprland-tts say --lang de --wait     # German, returns after playback
+hyprland-tts say -- "-5 Grad draußen"                       # -- : text may start with a dash
+```
+
+`--lang <code>` fixes the language (no detection); it must have a voice for the active engine,
+otherwise `say` fails with a message. `--wait` returns only when this reading has ended — played
+to the end, stopped (`hyprland-tts stop` or the shortcut) or replaced by another reading — so
+calls can be chained; Ctrl+C ends the wait, not the reading. `say` prints nothing on success;
+errors go to stderr with exit status 1 (unknown option, a language without a voice,
+`nothing to say` for empty or whitespace-only text).
+
 ---
 
 ## 🌍 Language detection and text preparation
@@ -378,6 +402,7 @@ Closing the window during an install asks first, because it cancels the install.
 hyprland-tts speak | hover | stop | ctl <next|prev|restart|faster|slower|pause|resume|toggle|status>
 hyprland-tts volume [<0-100>]                        # show / set the reader volume (live)
 hyprland-tts preview <lang> [--engine qwen3|piper] [--model <lang>/<name>]
+hyprland-tts say [--lang <code>] [--wait] [--] [<text>...]   # speak text (none or -: stdin)
 hyprland-tts engine status [--porcelain]
 hyprland-tts engine install qwen3 [--cpu|--vulkan] [--variant base|customvoice]
 hyprland-tts engine remove qwen3

@@ -243,7 +243,7 @@ speak_start_document() {
   ) 7> "$RUN_DIR/.speak.lock"
 }
 
-# speak_text — shared by cmd_speak, cmd_hover and cmd_preview: chunk the text, start the daemon.
+# speak_text — shared by speak, hover, preview and say: chunk the text, start the daemon.
 # Args:    $1 <text to speak>; $2 <optional language list; default: every language of the engine>
 # Returns: 0 on success or empty text; exits 1 via speak_fail without a usable engine
 # Globals: reads ENGINE, DEFAULT_LANG, HTTS_SELF, SELECTION_MAX_CHARS; writes RUN_DIR contents

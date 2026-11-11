@@ -47,7 +47,7 @@ case_install_layout() {
   lib="$stage/usr/lib/hyprland-tts"
   assert_file "$stage/usr/bin/hyprland-tts" "dispatcher installed"
   for module in common text router model image keybind engine qwen3 qwen3_install worker voices \
-    pyenv stream player setup hover preview; do
+    pyenv stream player setup hover preview say; do
     assert_file "$lib/$module.sh" "module $module installed"
   done
   assert_file "$lib/py/requirements.txt" "pinned helper requirements installed (deps install needs it)"
