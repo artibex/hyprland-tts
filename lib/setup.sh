@@ -63,6 +63,33 @@ setup_print_summary() {
   } >&2
 }
 
+# installed_binaries — list every distinct hyprland-tts binary on PATH.
+# Args:    none
+# Returns: 0 always; stdout: resolved paths, first one = the one keybinds run
+# Globals: reads PATH
+installed_binaries() {
+  # /bin and /usr/bin are often one directory, so resolved paths are de-duplicated.
+  type -ap hyprland-tts 2>/dev/null | xargs -r -d '\n' readlink -f | awk '!seen[$0]++'
+}
+
+# setup_report_other_installs — warn when PATH holds more than one hyprland-tts install.
+# Args:    none
+# Returns: 0 always; stderr: the installs and how to keep only one
+# Globals: none
+# Notes:   An older second install ran from keybinds and the menu and rewrote tts.lua with its
+#          own defaults (README troubleshooting).
+setup_report_other_installs() {
+  local installs
+  installs="$(installed_binaries || true)"
+  # One install (or none on PATH) is the healthy case.
+  [ "$(printf '%s\n' "$installs" | grep -c .)" -gt 1 ] || return 0
+  log "warning: several hyprland-tts installs on PATH; keybinds and the menu run the first:"
+  printf '%s\n' "$installs" | sed 's/^/           /' >&2
+  # Both ways out, and the re-run that restores the wiring afterwards.
+  log "         Keep one: sudo pacman -R hyprland-tts, or ./uninstall-tts.sh in the checkout;"
+  log "         then run 'hyprland-tts setup' again."
+}
+
 # hyprland_reload — ask a running Hyprland to re-read its configuration (best effort).
 # Args:    none
 # Returns: 0 always
@@ -89,6 +116,10 @@ cmd_setup() {
   fi
   hyprland_reload
   setup_print_summary
+  # The reload made every bind live, so clashes with the desktop's own keys are visible now.
+  keybind_report_conflicts
+  # A second install would undo this setup the next time it runs.
+  setup_report_other_installs
   # Without any Piper model the user still has no voice (unless the Qwen3 engine is installed).
   if [ -z "$(find "$MODELS_DIR" -type f -name '*.onnx' 2>/dev/null | head -n1)" ]; then
     log ""

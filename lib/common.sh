@@ -48,11 +48,15 @@ MAIN_LUA="$HYPR_DIR/hyprland.lua"
 # --- Tunable defaults (overridable via CONFIG_FILE) ---
 PIPER_BIN="${PIPER_BIN:-piper-tts}"
 MPV_BIN="${MPV_BIN:-mpv}"
+# Name of the reader's audio stream in mixers (and the key the sound server stores its volume by).
+PLAYER_CLIENT_NAME="hyprland-tts"
 DEFAULT_SPEED="${DEFAULT_SPEED:-1.0}"
 # Speed limits and step of the faster/slower controls.
 SPEED_MIN="0.5"
 SPEED_MAX="3.0"
 SPEED_STEP="0.2"
+# Reader volume in percent (0-100, mpv's own mixer); 100 = the normalised loudness, no boost.
+VOLUME="${VOLUME:-100}"
 # Maximum characters per synthesized chunk.
 CHUNK_MAX="240"
 # Longest selection that is spoken (characters); more is cut off with a notice.
@@ -83,16 +87,18 @@ STREAM_IDLE_TIMEOUT="${STREAM_IDLE_TIMEOUT:-5}"
 ACTION_ORDER=(speak stop next prev faster slower toggle restart)
 
 declare -gA ACTION_DEFAULT_KEY=(
-  [speak]="SUPER, A"
-  # Core shortcuts keep their original defaults (Agent.md §5).
-  [stop]="SUPER, ESCAPE"
-  [next]="SUPER ALT, right"
-  [prev]="SUPER ALT, left"
-  # Playback controls default to SUPER+ALT combinations.
-  [faster]="SUPER ALT, up"
-  [slower]="SUPER ALT, down"
-  [toggle]="SUPER ALT, space"
-  # Restart replays the current sentence.
+  # An add-on never takes the desktop's keys: no default collides with an Omarchy bind
+  # (Agent.md §5). Start, stop and replay live on SUPER+ALT.
+  [speak]="SUPER ALT, A"
+  [stop]="SUPER ALT, ESCAPE"
+  # The live playback controls share one layer, SUPER+CTRL+ALT; left/right step by sentence.
+  [next]="SUPER CTRL ALT, right"
+  [prev]="SUPER CTRL ALT, left"
+  # Up/down change the speed; space pauses and resumes, as in every media player.
+  [faster]="SUPER CTRL ALT, up"
+  [slower]="SUPER CTRL ALT, down"
+  [toggle]="SUPER CTRL ALT, space"
+  # Restart replays the current sentence (SUPER+CTRL+ALT+R is Omarchy's reminders).
   [restart]="SUPER ALT, R"
 )
 declare -gA ACTION_CMD=(

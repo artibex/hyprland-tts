@@ -68,11 +68,11 @@ case_generated_files() {
   lib_eval 'generate_tts_conf'
   local conf="$XDG_CONFIG_HOME/hypr/tts.conf" lua="$XDG_CONFIG_HOME/hypr/tts.lua"
   assert_eq 8 "$(grep -c '^bind = ' "$conf")" "eight binds in tts.conf"
-  assert_contains "$(cat "$conf")" "bind = SUPER, A, exec, hyprland-tts speak   # @tts:speak (Speak selection)" "speak line"
-  assert_contains "$(cat "$conf")" "bind = SUPER ALT, right, exec, hyprland-tts ctl next   # @tts:next (Next sentence)" "next line"
+  assert_contains "$(cat "$conf")" "bind = SUPER ALT, A, exec, hyprland-tts speak   # @tts:speak (Speak selection)" "speak line"
+  assert_contains "$(cat "$conf")" "bind = SUPER CTRL ALT, right, exec, hyprland-tts ctl next   # @tts:next (Next sentence)" "next line"
   assert_eq 8 "$(grep -c '^hl.bind(' "$lua")" "eight binds in tts.lua"
-  assert_contains "$(cat "$lua")" 'hl.bind("SUPER + A", hl.dsp.exec_cmd("hyprland-tts speak"), { description = "@tts:speak (Speak selection)" })' "lua speak line"
-  assert_contains "$(cat "$lua")" 'hl.bind("SUPER + ALT + space", hl.dsp.exec_cmd("hyprland-tts ctl toggle")' "lua toggle line"
+  assert_contains "$(cat "$lua")" 'hl.bind("SUPER + ALT + A", hl.dsp.exec_cmd("hyprland-tts speak"), { description = "@tts:speak (Speak selection)" })' "lua speak line"
+  assert_contains "$(cat "$lua")" 'hl.bind("SUPER + CTRL + ALT + space", hl.dsp.exec_cmd("hyprland-tts ctl toggle")' "lua toggle line"
 }
 
 # case_list_formats — plain and porcelain listings show the effective keys.
@@ -86,8 +86,8 @@ case_list_formats() {
   porcelain="$(htts keybind list --porcelain)"
   assert_eq 8 "$(printf '%s\n' "$plain" | wc -l)" "eight rows"
   assert_contains "$plain" "  stop      Stop speech        SUPER, Q" "plain row with override"
-  assert_contains "$plain" "  speak     Speak selection    SUPER, A" "plain row with default"
-  assert_eq "speak	Speak selection	SUPER, A" "$(printf '%s\n' "$porcelain" | head -n1)" "porcelain first row"
+  assert_contains "$plain" "  speak     Speak selection    SUPER ALT, A" "plain row with default"
+  assert_eq "speak	Speak selection	SUPER ALT, A" "$(printf '%s\n' "$porcelain" | head -n1)" "porcelain first row"
   assert_contains "$porcelain" "stop	Stop speech	SUPER, Q" "porcelain override"
   assert_eq 8 "$(printf '%s\n' "$porcelain" | wc -l)" "eight porcelain rows"
 }
@@ -100,10 +100,10 @@ case_list_self_heals_stale_conf() {
   fake_hyprctl '[]'
   htts keybind list >/dev/null 2>&1
   : > "$FAKE_HYPRCTL_LOG"
-  sed -i 's/^bind = SUPER, A,/bind = SUPER ALT, a,/' "$XDG_CONFIG_HOME/hypr/tts.conf"
-  assert_contains "$(cat "$XDG_CONFIG_HOME/hypr/tts.conf")" "SUPER ALT, a" "drift planted"
+  sed -i 's/^bind = SUPER ALT, A,/bind = SUPER, Q,/' "$XDG_CONFIG_HOME/hypr/tts.conf"
+  assert_contains "$(cat "$XDG_CONFIG_HOME/hypr/tts.conf")" "bind = SUPER, Q," "drift planted"
   htts keybind list >/dev/null 2>&1
-  assert_contains "$(cat "$XDG_CONFIG_HOME/hypr/tts.conf")" "bind = SUPER, A, exec" "stale bind regenerated"
+  assert_contains "$(cat "$XDG_CONFIG_HOME/hypr/tts.conf")" "bind = SUPER ALT, A, exec" "stale bind regenerated"
   assert_eq 1 "$(grep -c '^hyprctl reload' "$FAKE_HYPRCTL_LOG")" "reloaded because content changed"
   htts keybind list >/dev/null 2>&1
   assert_eq 1 "$(grep -c '^hyprctl reload' "$FAKE_HYPRCTL_LOG")" "no reload when nothing changed"
@@ -167,6 +167,29 @@ case_conflict_detection() {
   assert_eq "" "$(htts keybind check "SUPER, Z")" "free combo reports nothing"
   assert_eq "64 B -> exec firefox" "$(htts keybind check "SUPER, b")" "key compared case-insensitively"
   assert_eq "4 B -> exec other" "$(htts keybind check "CTRL, B")" "ctrl modmask"
+  # Lua binds only carry a numeric id, so the description must name them.
+  fake_hyprctl "[$(bind_json 64 A __lua 70 'Select all')]"
+  assert_eq "64 A -> __lua 70 (Select all)" "$(htts keybind check "SUPER, A")" "description shown"
+}
+
+# case_defaults_avoid_omarchy_binds — no default shortcut takes a key Omarchy binds itself.
+# Args:    none
+# Returns: 0 always
+# Globals: reads tests/data/omarchy-default-binds.txt
+# Notes:   An add-on must not bend the desktop (Agent.md §5); SUPER+A was Omarchy's "Select all".
+case_defaults_avoid_omarchy_binds() {
+  local snapshot taken
+  snapshot="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/data/omarchy-default-binds.txt"
+  assert_file "$snapshot" "omarchy snapshot present"
+  # The snapshot must still catch the old collision, else an empty or broken file would pass.
+  assert_contains "$(cat "$snapshot")" "64 A  # Select all" "snapshot knows Select all"
+  taken="$(lib_eval '
+    for action in "${ACTION_ORDER[@]}"; do
+      _split_combo "${ACTION_DEFAULT_KEY[$action]}"
+      mask="$(_mods_to_mask "$_KB_MODS")"
+      grep -i -m1 "^$mask ${_KB_KEY} " "'"$snapshot"'" | sed "s/^/$action: /"
+    done')"
+  assert_eq "" "$taken" "no default collides with an Omarchy bind"
 }
 
 # case_check_without_hyprctl_and_usage — no hyprctl means no conflicts; check needs an argument.
@@ -192,7 +215,7 @@ case_reset() {
   assert_contains "$out" "Reset 'speak' to default" "confirmation"
   assert_not_contains "$(cat "$XDG_CONFIG_HOME/piper-tts/config")" "KEY_speak" "speak override gone"
   assert_contains "$(cat "$XDG_CONFIG_HOME/piper-tts/config")" "KEY_stop" "stop override kept"
-  assert_contains "$(cat "$XDG_CONFIG_HOME/hypr/tts.conf")" "bind = SUPER, A, exec, hyprland-tts speak" "tts.conf regenerated"
+  assert_contains "$(cat "$XDG_CONFIG_HOME/hypr/tts.conf")" "bind = SUPER ALT, A, exec, hyprland-tts speak" "tts.conf regenerated"
   out="$(htts keybind reset 2>&1)"
   assert_contains "$out" "Reset all keybinds to defaults" "reset all message"
   assert_not_contains "$(cat "$XDG_CONFIG_HOME/piper-tts/config")" "KEY_stop" "all overrides gone"

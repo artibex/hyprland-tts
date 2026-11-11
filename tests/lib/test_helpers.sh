@@ -112,6 +112,9 @@ FAKE
   printf '#!/bin/sh\nexit 0\n' > "$bin/gcc"
   cp "$bin/gcc" "$bin/g++"
   cp "$bin/gcc" "$bin/make"
+  # A quiet hyprctl keeps tests off a live desktop: no reloads, no real binds (suites may override).
+  # shellcheck disable=SC2016
+  printf '#!/bin/sh\n[ "$1 $2" != "binds -j" ] || echo "[]"\nexit 0\n' > "$bin/hyprctl"
   chmod +x "$bin"/*
 }
 
@@ -201,7 +204,7 @@ lib_eval() {
   bash -c 'set -euo pipefail; LIBDIR="$1"; HTTS_SELF="$2/bin/hyprland-tts"
     source "$LIBDIR/common.sh"
     for m in text router model image keybind engine qwen3 qwen3_install worker voices pyenv stream \
-      player setup hover; do
+      player setup hover preview; do
       source "$LIBDIR/$m.sh"; done
     load_config; eval "$3"' _ "$TEST_LIB" "$TEST_REPO_DIR" "$1"
 }

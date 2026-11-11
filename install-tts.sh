@@ -55,6 +55,45 @@ check_dependencies() {
   echo "  (Re-run this script afterwards.)"
 }
 
+# other_installs — list hyprland-tts installs that would shadow or compete with this one.
+# Args:    $1 <path of the binary this installer writes>
+# Returns: 0 always; stdout: one line per competing install (empty = none)
+# Globals: reads PATH
+other_installs() {
+  local own_binary="$1" found
+  # A pacman package also owns the menu entry and /usr/lib, whatever the PATH order is.
+  if command -v pacman >/dev/null 2>&1 && pacman -Qq hyprland-tts >/dev/null 2>&1; then
+    echo "pacman package $(pacman -Q hyprland-tts 2>/dev/null)"
+  fi
+  # Every other hyprland-tts on PATH runs instead of (or next to) ours; /bin and /usr/bin are
+  # often one directory, so paths are resolved before duplicates are dropped.
+  while IFS= read -r found; do
+    # Our own target is not a competitor.
+    [ "$found" = "$(readlink -f "$own_binary")" ] || echo "$found"
+  done < <(type -ap hyprland-tts 2>/dev/null | xargs -r -d '\n' readlink -f | awk '!seen[$0]++')
+}
+
+# check_no_other_install — stop before installing when another install would take over.
+# Args:    none
+# Returns: 0 when this is the only install; exits 1 otherwise (nothing is installed then)
+# Globals: reads PREFIX
+# Notes:   Two installs = two versions: keybinds, menu entry and GUI ran the older one (README).
+check_no_other_install() {
+  local competitors
+  competitors="$(other_installs "$PREFIX/bin/hyprland-tts")"
+  # Only a lone install is safe to continue.
+  [ -n "$competitors" ] || return 0
+  # The competitors are listed indented under one headline.
+  echo "  Another hyprland-tts install is present:"
+  printf '%s\n' "$competitors" | sed 's/^/    /'
+  # Name both clean ways out; nothing has been written yet.
+  echo "  It would keep running instead of this checkout (keybinds, menu entry, GUI)."
+  echo "  Upgrade the package from this checkout instead:  makepkg -si"
+  echo "  or remove it first:  sudo pacman -R hyprland-tts   (then re-run this script)"
+  # Non-zero, so scripted installs notice the refusal.
+  exit 1
+}
+
 # install_files — install the program files into the prefix via the Makefile.
 # Args:    none
 # Returns: 0 on success; non-zero when make fails (set -e then ends the script)
@@ -70,8 +109,10 @@ install_files() {
 # Returns: 0 always
 # Globals: reads PREFIX, PATH
 check_path() {
-  # An already visible command needs no advice.
-  if command -v hyprland-tts >/dev/null 2>&1; then
+  local resolved
+  resolved="$(command -v hyprland-tts 2>/dev/null || true)"
+  # Only our own binary counts as "on PATH"; any other one would be a second install.
+  if [ "$resolved" = "$PREFIX/bin/hyprland-tts" ]; then
     echo "[3/4] hyprland-tts is on PATH."
     return 0
   fi
@@ -106,7 +147,7 @@ print_next_steps() {
  Installed. Next steps:
    1) Install a voice:   hyprland-tts gui
                     or:  hyprland-tts model install en-ryan-high
-   2) Highlight text and press SUPER + A to speak.
+   2) Highlight text and press SUPER + ALT + A to speak.
    3) Optional, neural voices:  hyprland-tts engine install qwen3
       (needs cmake git gcc make; shaderc + vulkan-icd-loader for the GPU build)
 =================================================
@@ -122,6 +163,8 @@ main() {
   # Missing tools are only reported: piper-tts is the sole hard blocker for speaking, and
   # the user can still install voices and wire keybinds.
   check_dependencies
+  # A second install would shadow this one, so stop before anything is written.
+  check_no_other_install
   install_files
   check_path
   # Wiring last: it needs the installed binary.

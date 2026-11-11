@@ -28,10 +28,51 @@ case_setup_without_main_config() {
   assert_file "$XDG_CONFIG_HOME/hypr/tts.conf" "tts.conf written"
   assert_file "$XDG_CONFIG_HOME/hypr/tts.lua" "tts.lua written"
   assert_contains "$out" "hyprland-tts setup complete. Default shortcuts:" "summary headline"
-  assert_contains "$out" "  Speak selection    SUPER, A" "summary lists the speak key"
+  assert_contains "$out" "  Speak selection    SUPER ALT, A" "summary lists the speak key"
   assert_contains "$out" "  Replay sentence    SUPER ALT, R" "summary lists the last action"
   assert_contains "$out" "Manage voices/keys : hyprland-tts gui" "gui hint"
   assert_contains "$out" "No voice models yet. Install one, e.g.:  hyprland-tts model install en-ryan-high" "voice hint"
+}
+
+# case_setup_warns_about_shared_keys — setup names a desktop bind that shares a shortcut, and the fix.
+# Args:    none
+# Returns: 0 always
+# Globals: reads TEST_ROOT
+case_setup_warns_about_shared_keys() {
+  # A fake hyprctl that serves one foreign bind on SUPER+ALT+A (modmask 72) and our own speak bind.
+  export FAKE_BINDS_JSON='[{"modmask": 72, "key": "A", "description": "Other app", "dispatcher": "__lua", "arg": "9"},
+{"modmask": 72, "key": "A", "description": "@tts:speak (Speak selection)", "dispatcher": "__lua", "arg": "10"}]'
+  printf '#!/bin/sh\n[ "$1 $2" != "binds -j" ] || printf "%%s\\n" "$FAKE_BINDS_JSON"\n' \
+    > "$TEST_ROOT/fakebin/hyprctl"
+  chmod +x "$TEST_ROOT/fakebin/hyprctl"
+  local out; out="$(htts setup 2>&1)"
+  assert_rc 0 "$?" "a shared key never fails setup"
+  assert_contains "$out" "warning: Speak selection (SUPER ALT, A) is also bound by:" "warning headline"
+  assert_contains "$out" "72 A -> __lua 9 (Other app)" "foreign bind named"
+  assert_contains "$out" 'Choose a free key: hyprland-tts keybind set speak "MODS, KEY"' "fix shown"
+  assert_eq 1 "$(printf '%s\n' "$out" | grep -c '^warning: .* is also bound by:')" "only the shared key"
+  # With only our own binds live, setup stays quiet about keys.
+  export FAKE_BINDS_JSON='[{"modmask": 72, "key": "A", "description": "@tts:speak (Speak selection)", "dispatcher": "__lua", "arg": "10"}]'
+  out="$(htts setup 2>&1)"
+  assert_not_contains "$out" "is also bound by" "no warning when every key is free"
+}
+
+# case_setup_warns_about_other_installs — two installs on PATH are named, one is quiet.
+# Args:    none
+# Returns: 0 always
+# Globals: none
+case_setup_warns_about_other_installs() {
+  local out
+  # The PATH lookup is stubbed, so the real machine's installs never leak into the result.
+  out="$(lib_eval 'installed_binaries() { printf "/usr/bin/hyprland-tts\n/home/u/.local/bin/hyprland-tts\n"; }
+    setup_report_other_installs' 2>&1)"
+  assert_contains "$out" "warning: several hyprland-tts installs on PATH" "warning headline"
+  assert_contains "$out" "           /home/u/.local/bin/hyprland-tts" "second install listed"
+  assert_contains "$out" "then run 'hyprland-tts setup' again." "fix shown"
+  out="$(lib_eval 'installed_binaries() { echo /usr/bin/hyprland-tts; }; setup_report_other_installs' 2>&1)"
+  assert_eq "" "$out" "one install is quiet"
+  out="$(lib_eval 'installed_binaries() { return 1; }; setup_report_other_installs' 2>&1)"
+  assert_eq "" "$out" "no install on PATH is quiet"
 }
 
 # case_setup_conf_is_idempotent — the legacy source line is added once and survives a second run.

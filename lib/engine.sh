@@ -15,11 +15,11 @@ ENGINE_LOADING_NOTICE_PID=""
 # engine_selected — print the engine the user asked for.
 # Args:    none
 # Returns: 0 always; stdout: auto | qwen3 | piper
-# Globals: reads ENGINE
+# Globals: reads ENGINE; HYPRLAND_TTS_ENGINE (set by `preview --engine`) beats it
 engine_selected() {
   # Anything unrecognised in a hand-edited config behaves like the default.
-  case "$ENGINE" in
-    qwen3|piper) printf '%s' "$ENGINE" ;;
+  case "${HYPRLAND_TTS_ENGINE:-$ENGINE}" in
+    qwen3|piper) printf '%s' "${HYPRLAND_TTS_ENGINE:-$ENGINE}" ;;
     *) printf 'auto' ;;
   esac
 }
@@ -165,7 +165,9 @@ piper_render() {
     [ -s "$3" ] || return 1
   # Same loudness as the neural voices; a failed check must not silence the fallback.
   wav_finish "$3" 0 || true
-  # Keep the router's "last used voice" fallback working now that voices are chosen per chunk.
+  # Keep the router's "last used voice" fallback working now that voices are chosen per chunk;
+  # a preview is a test listen, not a use, so it leaves that memory alone.
+  [ -z "${HYPRLAND_TTS_PIPER_MODEL:-}" ] || return 0
   ! declare -F remember_model >/dev/null || remember_model "$model"
 }
 

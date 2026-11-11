@@ -152,6 +152,15 @@ KILL_GRACE_SECONDS = 3
 MAX_LOG_LINES = 800
 # Valid range of the worker idle timeout accepted by `engine config idle`.
 IDLE_MINUTES_RANGE = (1, 240)
+# Valid range of the integer reader volume accepted by `volume <n>`, in percent.
+VOLUME_RANGE = (0, 100)
+# Slider step in percent for keyboard and scroll-wheel moves.
+VOLUME_STEP = 5
+# Milliseconds the slider must rest before the new volume is sent, so a drag is one call.
+VOLUME_DEBOUNCE_MS = 300
+# Icon and tooltip of the per-language "play a sample" buttons.
+PLAY_SAMPLE_ICON = "media-playback-start-symbolic"
+PLAY_SAMPLE_TOOLTIP = "Play a sample"
 
 # Engine choices: CLI value, title and one-line explanation, in display order.
 ENGINE_CHOICES = (
@@ -286,6 +295,39 @@ def to_int(value, default):
     """
     # isdigit rejects negatives and junk, which no setting here may take.
     return int(value) if value.isdigit() else default
+
+
+def parse_volume(text):
+    """Read the reader volume from the output of `volume`.
+
+    Args:
+        text: Raw stdout, normally one line such as "100".
+
+    Returns:
+        The volume in percent, or None when the output is not a value in VOLUME_RANGE.
+    """
+    lowest, highest = VOLUME_RANGE
+    # -1 marks unreadable output, which the range check below then rejects.
+    volume = to_int(text.strip(), -1)
+    return volume if lowest <= volume <= highest else None
+
+
+def neural_sample_blocker(engine_installed, current_voice):
+    """Explain why a neural voice sample cannot be played, if it cannot.
+
+    Args:
+        engine_installed: Whether Qwen3-TTS is installed.
+        current_voice: Voice the language resolves to ("" when none).
+
+    Returns:
+        A tooltip text naming the obstacle, or "" when the sample can be played.
+    """
+    if not engine_installed:
+        return "Install Qwen3-TTS on the Engine tab to play a sample"
+    # Without a resolved voice the engine has nothing to speak the sample with.
+    if not current_voice:
+        return "No voice is available for this language"
+    return ""
 
 
 def parse_engine_status(text):
@@ -1843,8 +1885,47 @@ class NeuralVoicesSection(Gtk.Box):
         # The engine's language list is authoritative; the assignment list is the fallback.
         languages = status.languages or list(catalog.assignments)
         for language in languages:
-            group.add(self._language_row(language, catalog.assignments.get(language, ""), choices))
+            current_voice = catalog.assignments.get(language, "")
+            row = self._language_row(language, current_voice, choices)
+            # The sample button sits in front of the combo's own drop-down arrow.
+            row.add_suffix(self._sample_button(language, current_voice, status.qwen3_installed))
+            group.add(row)
         return group
+
+    def _sample_button(self, language, current_voice, engine_installed):
+        """Create the ▶ button that speaks a sample sentence with a language's voice.
+
+        Args:
+            language: Two-letter language code.
+            current_voice: Voice the language currently resolves to ("" when none).
+            engine_installed: Whether Qwen3-TTS is installed.
+
+        Returns:
+            A Gtk.Button; insensitive, with the reason as tooltip, when nothing can play.
+        """
+        button = make_button(
+            icon=PLAY_SAMPLE_ICON, tooltip=PLAY_SAMPLE_TOOLTIP,
+            on_click=functools.partial(self.on_play_sample, language),
+        )
+        blocker = neural_sample_blocker(engine_installed, current_voice)
+        # A disabled button explains itself, so the user knows what is missing.
+        if blocker:
+            button.set_sensitive(False)
+            button.set_tooltip_text(blocker)
+        return button
+
+    def on_play_sample(self, language):
+        """Speak the built-in sample sentence of a language with its neural voice.
+
+        Args:
+            language: Two-letter language code.
+
+        Returns:
+            None.
+        """
+        # A quick command: no busy lock and no page refresh while the sample plays.
+        self.host.run_quiet(["preview", language, "--engine", "qwen3"],
+                            f"Playing sample: {language_title(language)}")
 
     def _language_row(self, language, current_voice, choices):
         """Create the selector row of one language.
@@ -2155,6 +2236,11 @@ class PiperVoicesSection(Gtk.Box):
         row = make_info_row(voice["name"], " · ".join(tags))
         # The id (language/model) is what every model subcommand takes.
         voice_id = voice["id"]
+        # Listening comes first, before the buttons that change or delete the voice.
+        row.add_suffix(make_button(
+            icon=PLAY_SAMPLE_ICON, tooltip=PLAY_SAMPLE_TOOLTIP,
+            on_click=functools.partial(self.on_play_sample, voice),
+        ))
         if not voice["default"]:
             row.add_suffix(make_button(
                 icon="starred-symbolic", tooltip=f"Make default for {voice['lang'].upper()}",
@@ -2216,6 +2302,19 @@ class PiperVoicesSection(Gtk.Box):
                 on_click=functools.partial(self.on_install, entry["key"]),
             ))
         return row
+
+    def on_play_sample(self, voice):
+        """Speak the sample sentence of a voice's language with that installed voice.
+
+        Args:
+            voice: Dict from parse_installed_voices.
+
+        Returns:
+            None.
+        """
+        args = ["preview", voice["lang"], "--engine", "piper", "--model", voice["id"]]
+        # A quick command: no busy lock and no page refresh while the sample plays.
+        self.host.run_quiet(args, f"Playing sample: {voice['name']}")
 
     def on_install(self, key):
         """Download a catalogue voice.
@@ -2328,11 +2427,102 @@ class PiperVoicesSection(Gtk.Box):
         self.host.run_task(args, "Custom voice installed", DOWNLOAD_TIMEOUT)
 
 
-class VoicesPage(PageBase):
-    """Neural voices per language, cloned voices and the Piper voice manager."""
+class PlaybackGroup(Adw.PreferencesGroup):
+    """Reader volume slider and Stop button; built once and never rebuilt by a refresh."""
 
     def __init__(self, host):
-        """Build the page from its two sections.
+        """Build the volume row at full volume until the first query reports the real value.
+
+        Args:
+            host: The TtsWindow (or a test double) offering run_quiet.
+
+        Returns:
+            None.
+        """
+        super().__init__(title="Playback")
+        self.host = host
+        # GLib source id of the debounced volume update, or None when nothing is pending.
+        self._pending_source = None
+        self.volume_scale = self._build_scale()
+        row = make_info_row("Volume", "Loudness of the reading voice; 100% is full volume")
+        row.add_suffix(self.volume_scale)
+        # Stop is a quick command, so it never waits behind the busy lock of run_task.
+        row.add_suffix(make_button(
+            icon="media-playback-stop-symbolic", tooltip="Stop playback",
+            on_click=lambda: self.host.run_quiet(["stop"]),
+        ))
+        self.add(row)
+
+    def _build_scale(self):
+        """Create the percentage slider, connected only after its initial value is set.
+
+        Returns:
+            A horizontal Gtk.Scale over VOLUME_RANGE.
+        """
+        lowest, highest = VOLUME_RANGE
+        scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, lowest, highest, VOLUME_STEP)
+        # Wide enough for fine control, while the row title keeps its room.
+        scale.set_size_request(240, -1)
+        scale.set_hexpand(True)
+        scale.set_valign(Gtk.Align.CENTER)
+        # The value label shows whole percent next to the slider.
+        scale.set_digits(0)
+        scale.set_draw_value(True)
+        scale.set_value_pos(Gtk.PositionType.RIGHT)
+        scale.set_format_value_func(lambda _scale, value: f"{value:.0f}%")
+        # The initial value is set before connecting, so building the row never calls the CLI.
+        scale.set_value(highest)
+        self._handler_id = scale.connect("value-changed", self._on_value_changed)
+        return scale
+
+    def set_volume(self, volume):
+        """Show a volume read from the CLI without sending it back.
+
+        Args:
+            volume: Volume in percent, or None when the query gave no usable value.
+
+        Returns:
+            None.
+        """
+        # An unusable answer keeps the slider, and a pending user move beats the older query.
+        if volume is None or self._pending_source is not None:
+            return
+        # Blocking the handler keeps this programmatic update from becoming a `volume` call.
+        with self.volume_scale.handler_block(self._handler_id):
+            self.volume_scale.set_value(volume)
+
+    def _on_value_changed(self, _scale):
+        """Restart the debounce timer, so only the slider's resting value is sent.
+
+        Args:
+            _scale: The Gtk.Scale (unused).
+
+        Returns:
+            None.
+        """
+        # A newer move replaces the pending one instead of queueing a second call.
+        if self._pending_source is not None:
+            GLib.source_remove(self._pending_source)
+        self._pending_source = GLib.timeout_add(VOLUME_DEBOUNCE_MS, self._apply_volume)
+
+    def _apply_volume(self):
+        """Send the slider's current value to the CLI once the debounce has expired.
+
+        Returns:
+            False, which removes the one-shot timeout source.
+        """
+        self._pending_source = None
+        volume = round(self.volume_scale.get_value())
+        # run_quiet neither locks the window nor refreshes the page mid-drag.
+        self.host.run_quiet(["volume", str(volume)])
+        return False
+
+
+class VoicesPage(PageBase):
+    """Playback controls, neural voices per language, cloned voices and the Piper manager."""
+
+    def __init__(self, host):
+        """Build the page from its playback group and two voice sections.
 
         Args:
             host: The TtsWindow (or a test double).
@@ -2341,14 +2531,17 @@ class VoicesPage(PageBase):
             None.
         """
         super().__init__(host)
+        # The playback group is built once; refreshes only update its slider value.
+        self.playback = PlaybackGroup(host)
         self.neural = NeuralVoicesSection(host)
         self.piper = PiperVoicesSection(host)
-        # Neural voices lead the page; the Piper manager follows below.
+        # Playback leads the page, neural voices follow, the Piper manager comes last.
+        self.content.append(self.playback)
         self.content.append(self.neural)
         self.content.append(self.piper)
 
     def refresh(self):
-        """Query engine status, neural voices and Piper voices, then re-render.
+        """Query engine status, neural voices, Piper voices and the volume, then re-render.
 
         Returns:
             None.
@@ -2359,26 +2552,30 @@ class VoicesPage(PageBase):
             ["voice", "list", "--porcelain"],
             ["model", "list", "--porcelain"],
             ["model", "catalog", "--porcelain"],
+            ["volume"],
         ]
         self.host.query(commands, lambda results: self._render(token, results))
 
     def _render(self, token, results):
-        """Render both sections unless a newer refresh superseded this one.
+        """Render both sections and the volume unless a newer refresh superseded this one.
 
         Args:
             token: Refresh generation the queries belonged to.
-            results: Four CliResults in the order of refresh().
+            results: Five CliResults in the order of refresh().
 
         Returns:
             None.
         """
         if not self.is_current(token):
             return
-        status_result, voice_result, installed_result, catalog_result = results
+        status_result, voice_result, installed_result, catalog_result, volume_result = results
         # A failed status query only costs the variant hint, never the whole page.
         status = parse_engine_status(status_result.stdout if status_result.returncode == 0 else "")
         self.neural.render(status, voice_result)
         self.piper.render(installed_result, catalog_result)
+        # A failed volume query is silent: the slider just keeps its current position.
+        volume_ok = volume_result.returncode == 0
+        self.playback.set_volume(parse_volume(volume_result.stdout) if volume_ok else None)
 
 
 class LanguagePage(PageBase):
@@ -2628,7 +2825,7 @@ class ShortcutsPage(PageBase):
         Args:
             action: Action id such as "speak".
             label: Human-readable action name.
-            combo: Current combo such as "SUPER, A" ("" when unset).
+            combo: Current combo such as "SUPER ALT, A" ("" when unset).
 
         Returns:
             An Adw.ActionRow.
@@ -2915,6 +3112,47 @@ class TtsWindow(Adw.ApplicationWindow):
         threading.Thread(target=work, daemon=True).start()
         # The worker thread reports back on its own; True only says the task started.
         return True
+
+    def run_quiet(self, args, ok_message=None):
+        """Run one quick playback command in the background without locking the window.
+
+        Unlike run_task this neither shows the busy spinner nor refreshes the pages, so a
+        slider being dragged is never rebuilt underneath the user.
+
+        Args:
+            args: Argument list after the executable name.
+            ok_message: Toast text on success, or None to stay silent.
+
+        Returns:
+            None.
+        """
+        def work():
+            """Run the command and hand the result to the main loop.
+
+            Returns:
+                None.
+            """
+            result = run_cli(args, timeout=TASK_TIMEOUT)
+            on_main_thread(self._finish_quiet, result, ok_message)
+
+        # Playback commands return quickly, so a plain daemon thread is enough.
+        threading.Thread(target=work, daemon=True).start()
+
+    def _finish_quiet(self, result, ok_message):
+        """Report a finished quick command: errors always, success only when asked to.
+
+        Args:
+            result: The CliResult.
+            ok_message: Toast text on success, or None.
+
+        Returns:
+            None.
+        """
+        if result.returncode != 0:
+            self.toast(error_message(result))
+        elif ok_message:
+            # Silent success suits the volume slider; previews name what is playing.
+            self.toast(ok_message)
 
     def _finish_task(self, result, ok_message, on_done):
         """Report a finished task, run its cleanup and reload the pages.

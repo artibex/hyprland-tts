@@ -243,8 +243,8 @@ speak_start_document() {
   ) 7> "$RUN_DIR/.speak.lock"
 }
 
-# speak_text — shared by cmd_speak and cmd_hover: chunk the text and start the daemon.
-# Args:    $1 <text to speak>
+# speak_text — shared by cmd_speak, cmd_hover and cmd_preview: chunk the text, start the daemon.
+# Args:    $1 <text to speak>; $2 <optional language list; default: every language of the engine>
 # Returns: 0 on success or empty text; exits 1 via speak_fail without a usable engine
 # Globals: reads ENGINE, DEFAULT_LANG, HTTS_SELF, SELECTION_MAX_CHARS; writes RUN_DIR contents
 speak_text() {
@@ -255,7 +255,8 @@ speak_text() {
   # The engine decides which tools and which language list apply.
   active_engine="$(engine_active)"
   speak_check_tools "$active_engine"
-  allowed="$(engine_languages)"
+  # A caller that knows the language (a voice preview) skips detection with a one-item list.
+  allowed="${2:-$(engine_languages)}"
   # No usable voice for the active engine: nothing could be spoken.
   [ -n "$allowed" ] ||
     speak_fail "No voice installed: run 'hyprland-tts gui' or 'hyprland-tts model install <key>'"
@@ -268,11 +269,11 @@ speak_text() {
 # speak_notice_engine_choice — tell the user once when a requested engine is not usable.
 # Args:    none
 # Returns: 0 always
-# Globals: reads ENGINE
+# Globals: reads ENGINE and HYPRLAND_TTS_ENGINE (a preview's forced engine) via engine_selected
 speak_notice_engine_choice() {
   local reason
   # Only a requested-but-unusable Qwen3 deserves a notice; auto quietly uses Piper.
-  [ "$ENGINE" = "qwen3" ] && [ "$(engine_active)" = "piper" ] || return 0
+  [ "$(engine_selected)" = "qwen3" ] && [ "$(engine_active)" = "piper" ] || return 0
   reason="$(engine_unusable_reason)"
   if [ "$reason" = "not installed" ]; then
     # Nothing to find: the engine is simply absent.
@@ -317,19 +318,24 @@ daemon_report_failure() {
 # daemon_start_mpv — launch the idle mpv with its IPC socket and wait for the socket.
 # Args:    none
 # Returns: 0 when the socket exists; 1 when mpv never came up
-# Globals: reads MPV_BIN, MPV_SOCK, DEFAULT_SPEED; writes DAEMON_MPV_PID
+# Globals: reads MPV_BIN, MPV_SOCK, DEFAULT_SPEED, PLAYER_CLIENT_NAME, VOLUME;
+#          writes DAEMON_MPV_PID
 daemon_start_mpv() {
-  local waited=0
+  local waited=0 mpv_options
   # Unix socket paths are limited to about 107 bytes; a longer one makes mpv ignore the option.
   if [ "${#MPV_SOCK}" -gt 100 ]; then
     daemon_report_failure "runtime path too long: $MPV_SOCK"
     return 1
   fi
-  # One idle mpv for all chunks; no scripts, so a system mpris.so cannot let the desktop pause
-  # the reader (Agent.md, MPRIS); keep-open=no protects end detection from a user mpv.conf.
-  "$MPV_BIN" --idle=yes --no-video --force-window=no --no-terminal \
-    --load-scripts=no --keep-open=no \
-    --input-ipc-server="$MPV_SOCK" \
+  # No scripts, so a system mpris.so cannot let the desktop pause the reader (Agent.md, MPRIS);
+  # keep-open=no protects end detection from a user mpv.conf.
+  mpv_options=(--idle=yes --no-video --force-window=no --no-terminal --load-scripts=no
+    --keep-open=no)
+  # An own client name gives the reader its own mixer entry: as "mpv" it got the volume the
+  # sound server stores for every mpv (a video turned down made the reader nearly silent).
+  mpv_options+=(--audio-client-name="$PLAYER_CLIENT_NAME" --volume="$(playback_volume)")
+  # One idle mpv for all chunks, driven over its IPC socket.
+  "$MPV_BIN" "${mpv_options[@]}" --input-ipc-server="$MPV_SOCK" \
     --audio-pitch-correction=yes --speed="$DEFAULT_SPEED" >/dev/null 2>&1 &
   DAEMON_MPV_PID=$!
   # Wait up to about 3 s for the socket (polled every 20 ms: it is on the path to first audio).
@@ -476,14 +482,26 @@ render_worker() {
   touch "$DONEFILE"
 }
 
+# ctl_volume — print the live player's volume as a whole percentage.
+# Args:    none
+# Returns: 0 always; stdout: e.g. 40 (empty when mpv does not answer)
+# Globals: reads MPV_SOCK
+ctl_volume() {
+  local reported
+  reported="$(mpv_get volume)"
+  # mpv reports "40.000000"; only whole values are ever set, so the integer part is exact.
+  printf '%s' "${reported%%.*}"
+}
+
 # ctl_status — print the player state for `ctl status`.
 # Args:    none
-# Returns: 0 always; stdout: "pos=<n>/<count> speed=<x> paused=<bool>" or "idle"
+# Returns: 0 always; stdout: "pos=<n>/<count> speed=<x> paused=<bool> volume=<0-100>" or "idle"
 # Globals: reads MPV_SOCK
 ctl_status() {
   if daemon_alive && [ -S "$MPV_SOCK" ]; then
-    printf 'pos=%s/%s speed=%s paused=%s\n' "$(mpv_get playlist-pos)" \
-      "$(mpv_get playlist-count)" "$(mpv_get speed)" "$(mpv_get pause)"
+    # New fields are appended at the end, so readers of the older fields keep working.
+    printf 'pos=%s/%s speed=%s paused=%s volume=%s\n' "$(mpv_get playlist-pos)" \
+      "$(mpv_get playlist-count)" "$(mpv_get speed)" "$(mpv_get pause)" "$(ctl_volume)"
   else
     # Scripts and the GUI test for this exact word.
     echo "idle"
@@ -505,6 +523,63 @@ ctl_change_speed() {
     -v d="$direction" 'BEGIN{ v = (d=="up") ? c+st : c-st; if(v<lo)v=lo; if(v>hi)v=hi;
     printf "%.2f", v }')"
   mpv_set speed "$new_speed"
+}
+
+# volume_valid — tell whether a value is a whole volume percentage the reader accepts.
+# Args:    $1 <candidate value>
+# Returns: 0 for an integer from 0 to 100; 1 otherwise
+# Globals: none
+volume_valid() {
+  # Digits only (at most three), so the arithmetic below never sees junk or a sign.
+  [[ "$1" =~ ^[0-9]{1,3}$ ]] || return 1
+  # Above 100 mpv would amplify and the normalised speech (peaks near full scale) would clip.
+  [ "$((10#$1))" -le 100 ]
+}
+
+# playback_volume — print the volume the reader starts with.
+# Args:    none
+# Returns: 0 always; stdout: an integer percentage 0-100
+# Globals: reads VOLUME
+playback_volume() {
+  # A hand-edited junk value means the full, unchanged loudness.
+  if volume_valid "$VOLUME"; then
+    printf '%d' "$((10#$VOLUME))"
+  else
+    printf '100'
+  fi
+}
+
+# volume_store — validate, save and apply a new reader volume.
+# Args:    $1 <requested percentage>
+# Returns: 0 on success; exits 1 via die on an invalid value; stdout: "volume: <n>%"
+# Globals: writes VOLUME (config file); reads MPV_SOCK via daemon_alive
+volume_store() {
+  local percent="$1"
+  volume_valid "$percent" || die "invalid volume '$percent' (use 0-100)"
+  # "070" is stored as 70; the setting survives restarts in the config file.
+  percent="$((10#$percent))"
+  set_config_var VOLUME "$percent"
+  # A reader that is speaking right now changes at once; mpv's mixer has no audible step.
+  if daemon_alive && [ -S "$MPV_SOCK" ]; then mpv_set volume "$percent"; fi
+  printf 'volume: %s%%\n' "$percent"
+}
+
+# cmd_volume — implement `volume [<0-100>]`: show, or store and apply live, the reader volume.
+# Args:    $1 <optional percentage>
+# Returns: 0 on success; exits 1 via die on an invalid value or extra arguments
+# Globals: reads and writes VOLUME (config file); reads RUN_DIR files
+cmd_volume() {
+  # The stored value and the live player's socket are both needed below.
+  load_config
+  _player_paths
+  [ "$#" -le 1 ] || die "usage: hyprland-tts volume [<0-100>]"
+  # Without an argument the stored value is the answer (the GUI reads this line).
+  if [ "$#" -eq 0 ]; then
+    printf '%s\n' "$(playback_volume)"
+    return 0
+  fi
+  # An explicit empty argument is a mistake, not a query, so it goes through validation.
+  volume_store "$1"
 }
 
 # cmd_ctl — control the running player through mpv IPC.

@@ -41,6 +41,22 @@ Neural engine, native voices per language, real language detection, full polish.
   Implementation: `lib/stream.sh`, `lib/py/htts_stream.py`; tests `tests/test_stream.sh`,
   `tests/py/test_stream.py`.
 - **Per-chunk Piper fallback** with a single notification when a Qwen3 chunk fails.
+- **Reader volume**: `hyprland-tts volume` prints it, `hyprland-tts volume <0-100>` stores it
+  (`VOLUME`, default 100, an invalid value counts as 100) and changes a speaking reader at once
+  over mpv IPC. It is mpv's own mixer (cubic curve), on top of the system volume, and capped at
+  100: speech is normalised to about −21 dBFS RMS with peaks near full scale, so more would
+  clip (an mpv lavfi limiter could not be driven live through `af-command` in mpv 0.41, so there
+  is no boost). `ctl status` also prints `volume=`.
+- **Voice preview**: `hyprland-tts preview <lang> [--engine qwen3|piper] [--model <lang>/<name>]`
+  speaks a built-in sample sentence (de en fr es it pt ru zh ja ko) through the normal player
+  (volume, speed and the stop shortcut apply), with the language fixed instead of detected.
+  Without `--engine` it uses the active engine; `--model` implies Piper and plays that installed
+  voice (same language only) without changing the "last used" voice. Implementation:
+  `lib/preview.sh`.
+- GUI, *Voices* page: a *Playback* group on top with a volume slider (applied after a short pause
+  while dragging) and a Stop button; a ▶ preview button on every neural *voice per language* row
+  (disabled when Qwen3 is not installed or the language has no voice) and on every installed Piper
+  voice.
 - **GUI redesign**: pages *Engine* (status, engine choice, install with live log and Cancel,
   remove, worker start/stop, idle timeout, switch model), *Voices* (voice per language, cloned
   voices with mandatory licence/consent confirmation, attribution viewer, Piper management),
@@ -53,9 +69,33 @@ Neural engine, native voices per language, real language detection, full polish.
 
 ### Changed
 
+- **New default shortcuts — hyprland-tts no longer takes Omarchy's keys.** Omarchy 4 binds
+  `SUPER + A` (*Select all*), `SUPER + ESCAPE` (*System menu*), `SUPER + ALT + arrows` (*Move
+  window to group*) and `SUPER + ALT + Space` (*Apps*); the old defaults shared those combos, so
+  speaking a selection first replaced it. New: speak `SUPER + ALT + A`, stop `SUPER + ALT +
+  ESCAPE`, replay `SUPER + ALT + R` (unchanged), next/previous/faster/slower `SUPER + CTRL + ALT +
+  arrows`, pause/resume `SUPER + CTRL + ALT + Space`. **Upgrading from 1.x: run
+  `hyprland-tts setup` once**; your own `keybind set` choices are kept.
+- `setup` warns about every shortcut another live bind also uses, with the fix command;
+  `keybind check` (and the GUI's conflict dialog) names the other bind by its description, since
+  Lua binds only report a numeric id (`64 A -> __lua 70 (Select all)`).
+- `make uninstall` (and `./uninstall-tts.sh`) with `PREFIX=~/.local` no longer deletes
+  `~/.local/share/hyprland-tts` wholesale — that is also the data directory holding the Qwen3
+  engine and the user's cloned voices. Only `shipped-voices/` is removed.
+- `install-tts.sh` refuses to install into `~/.local` while another hyprland-tts install exists
+  (pacman package or another binary on PATH): the older `/usr/bin` copy shadowed the new one, and
+  its GUI rewrote `tts.lua` with the old defaults. `setup` warns when PATH holds several installs.
+- The test suite checks every default against a snapshot of Omarchy's default bindings
+  (`tests/data/omarchy-default-binds.txt`, refreshed with `make omarchy-snapshot`), and tests use
+  a quiet fake `hyprctl` so a run never reloads or reads the live desktop.
 - The reader's mpv starts with `--load-scripts=no --keep-open=no`: a system `mpris.so`
   (`mpv-mpris`) let the Omarchy shell pause the reader over MPRIS a few seconds into a document
   (found on the live desktop; README troubleshooting *Playback*).
+- The reader's mpv starts with `--audio-client-name=hyprland-tts` and has its own mixer entry
+  `hyprland-tts`. As plain `mpv` it shared WirePlumber's stored per-application volume
+  (`Output/Audio:application.id:mpv`) with every other mpv, so a video turned down in the mixer
+  left the reader silent or very quiet (found on the live desktop; README troubleshooting
+  *Playback*).
 - The player polls for the mpv socket and the daemon's pid file every 20 ms (was 50 ms): they sit
   on the path to the first sentence.
 - First chunk of a speak is at most 90 characters when it is rendered whole, so speech starts

@@ -113,11 +113,26 @@ model_for_lang() {
   local lang="$1" model
   # The code becomes part of a variable name and a path, so it must be plain letters.
   valid_lang_code "$lang" || return 1
+  # A voice preview names one installed voice of exactly this language; it beats every choice.
+  model="$(preview_model_for "$lang")" && { printf '%s' "$model"; return 0; }
   # A voice the user chose explicitly beats the first model on disk.
   model="$(configured_voice_for "$lang")" || model=""
   [ -n "$model" ] || model="$(first_model_in "$MODELS_DIR/$lang")" || model=""
   # A language without any model cannot be served here.
   [ -n "$model" ] || return 1
+  printf '%s' "$model"
+}
+
+# preview_model_for — print the Piper voice a preview forces for a language, if any.
+# Args:    $1 language code
+# Returns: 0 and the path on stdout when HYPRLAND_TTS_PIPER_MODEL is an installed voice of
+#          this language; 1 otherwise (no preview, other language, missing file)
+# Globals: reads HYPRLAND_TTS_PIPER_MODEL (exported by `preview --model`)
+preview_model_for() {
+  local model="${HYPRLAND_TTS_PIPER_MODEL:-}"
+  # Models live in <lang>/<name>.onnx, so the parent directory names the language.
+  [ -n "$model" ] && [ -f "$model" ] || return 1
+  [ "$(basename "$(dirname "$model")")" = "$1" ] || return 1
   printf '%s' "$model"
 }
 

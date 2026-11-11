@@ -41,22 +41,23 @@ and mirrors the voice-name rule only to enable a button; the CLI stays authorita
 
 | Module | Responsibility |
 | --- | --- |
-| `common.sh` | XDG paths, tunables (`ENGINE`, `QWEN_*`, `WORKER_IDLE_MINUTES`, …), config read/write (`set_config_var`), the **keybind action table** (`ACTION_*`), helpers (`log`/`die`/`have`/`notify`, `is_safe_name`, `json_escape`). |
+| `common.sh` | XDG paths, tunables (`ENGINE`, `QWEN_*`, `WORKER_IDLE_MINUTES`, `VOLUME`, …), `PLAYER_CLIENT_NAME` (the reader's audio identity, `hyprland-tts`), config read/write (`set_config_var`), the **keybind action table** (`ACTION_*`), helpers (`log`/`die`/`have`/`notify`, `is_safe_name`, `json_escape`). |
 | `text.sh` | Bash text path: `normalize_text` → `normalize_prose` or `normalize_code` (via `looks_like_code`), + `chunk_text`. Used as the **fallback** when the Python helpers are unavailable. |
-| `router.sh` | `prepare_chunks` (raw text → `<lang>\t<sentence>` lines; Python helper first, bash regex fallback), first-chunk cut (≤90 chars), `detect_lang`, `resolve_model` (Piper voice chain: detected → fallback voice → last used → en → any). |
+| `router.sh` | `prepare_chunks` (raw text → `<lang>\t<sentence>` lines; Python helper first, bash regex fallback), first-chunk cut (≤90 chars), `detect_lang`, `resolve_model` (Piper voice chain: detected → fallback voice → last used → en → any), `model_for_lang` (a preview's `preview_model_for` first). |
 | `model.sh` | Piper voice catalog + install / list / catalog / remove / default / **fallback** (+ all download security). |
 | `image.sh` | `read_clipboard_image` — exiftool metadata → tesseract OCR, graceful. |
-| `keybind.sh` | Generate `tts.conf` from the action table; `keybind list/set/check/reset`; conflict detection via `hyprctl binds -j`. |
-| `engine.sh` | Engine layer: `engine_selected/active/languages`, `engine_render` (Qwen3 first, **Piper safety net per chunk**, one notification per run), `piper_render`, `wav_finish` (calls `htts_wav.py`), `cmd_engine` (`status [--porcelain]`, `install`, `remove`, `use`, `variant`, `config idle`, `start`, `stop`). |
+| `keybind.sh` | Generate `tts.conf` from the action table; `keybind list/set/check/reset`; conflict detection via `hyprctl binds -j` (descriptions shown, Lua binds only carry an id); `keybind_report_conflicts` for `setup`. |
+| `engine.sh` | Engine layer: `engine_selected/active/languages` (`HYPRLAND_TTS_ENGINE` beats `ENGINE`), `engine_render` (Qwen3 first, **Piper safety net per chunk**, one notification per run), `piper_render`, `wav_finish` (calls `htts_wav.py`), `cmd_engine` (`status [--porcelain]`, `install`, `remove`, `use`, `variant`, `config idle`, `start`, `stop`). |
 | `qwen3.sh` | Qwen3 backend: pinned constants, install-tree paths, request building (`max_new_tokens` cap ∝ text length, optional seed), `qwen3_render` against the warm server, device selection, usability test. |
 | `qwen3_install.sh` | User-space install: pinned `qwentts.cpp` commit (verified after a shallow fetch), sha256-checked GGUF weights, Vulkan/CPU build (BLAS off), fetched Khronos headers when the system has none, flock-guarded. |
 | `worker.sh` | On-demand warm worker: flock-guarded start, loopback server on a random port, state in `$XDG_RUNTIME_DIR/hyprland-tts-worker` (0700), idle exit after `WORKER_IDLE_MINUTES`, `worker_ensure/kick/stop/status`. |
 | `stream.sh` | First-chunk streaming: `stream_wanted`, `stream_first_chunk` (FIFO entry in mpv + `htts_stream.py` pump), `stream_settle` (fallback / partial), `stream_repair_entry`. Called only from `render_worker`. |
 | `voices.sh` | Per-language voice choice, cloned voices (`voice list/add/remove/set`), shipped + user voice roots, latent encoding via `qwen-codec`, registration with the running server. |
 | `pyenv.sh` | Optional Python helper environment: private venv + hash-pinned `fasttext-predict`/`num2words`, fastText model download (`deps install/status/remove`), interpreter resolution. Optional: older installs lack it. |
-| `player.sh` | mpv-based smart player: `cmd_speak`, `speak_text` (shared with `hover`), `run_daemon`, `render_worker`, `cmd_ctl`, `cmd_stop` (playback only). |
+| `player.sh` | mpv-based smart player: `cmd_speak`, `speak_text <text> [<lang list>]` (shared with `hover` and `preview`; the optional list fixes the languages, skipping detection), `run_daemon`, `render_worker`, `cmd_ctl`, `cmd_stop` (playback only), `volume_valid`/`playback_volume`/`cmd_volume` (`volume [<0-100>]`, live over IPC). |
 | `setup.sh` | Idempotent Hyprland wiring: `setup` / `uninstall` / `purge`. |
 | `hover.sh` | `cmd_hover` — on-demand "speak text under the cursor" via `hyprctl cursorpos` + AT-SPI (`hover-read.py`, a non-sourced Python helper installed alongside the `lib/*.sh` modules). |
+| `preview.sh` | Voice preview: sample sentences per language (associative array), `preview_sentence`, `cmd_preview` (`preview <lang> [--engine qwen3\|piper] [--model <lang>/<name>]`): exports `HYPRLAND_TTS_ENGINE` / `HYPRLAND_TTS_PIPER_MODEL` for the detached `__daemon` and calls `speak_text` with the one language. |
 
 Python helpers (`lib/py/`, run by the helper venv's interpreter; **not** sourced):
 
@@ -73,8 +74,11 @@ Python helpers (`lib/py/`, run by the helper venv's interpreter; **not** sourced
 
 The GUI (`gui/hyprland-tts-gui`, GTK4/libadwaita, one file) has four pages — Engine, Voices,
 Language, Shortcuts — and only runs CLI commands (`engine …`, `voice …`, `deps …`, `model …`,
-`keybind …`). Short commands run on a worker thread (toast on completion); `engine install` and
-`deps install` run through `CliJob` (own process group, merged output streamed line by line into
+`keybind …`, `volume`, `stop`, `preview`). Short commands run on a worker thread through
+`run_task` (toast on completion, then every page is refreshed); `volume`, `stop` and `preview`
+use `run_quiet` instead (no busy lock, no page refresh, toast only on error), because a refresh
+would rebuild the volume slider while it is dragged. `engine install` and `deps install` run
+through `CliJob` (own process group, merged output streamed line by line into
 a log view, Cancel = SIGTERM to the group then SIGKILL after 3 s).
 
 The dispatcher resolves its lib dir from (in order) `$HYPRLAND_TTS_LIB`,
@@ -102,14 +106,15 @@ it will not be streamed (speech starts after its render), and long (≤200, sent
 it) when it will be: see "Chunk ramp and streaming" below.
 
 `__daemon` starts **one mpv** in idle mode with an IPC socket
-(`--input-ipc-server`, `--audio-pitch-correction=yes`), renders each chunk **once** through
+(`--input-ipc-server`, `--audio-pitch-correction=yes`, `--audio-client-name=hyprland-tts` from
+`PLAYER_CLIENT_NAME`, `--volume=` from `playback_volume`), renders each chunk **once** through
 `engine_render` to a WAV, and `loadfile … append-play`s it to mpv's playlist. Controls are **native
 mpv IPC commands over the socket via `socat`** and are therefore instant and glitch-free:
 `next/prev` = playlist-next/prev, `faster/slower` = set speed (pitch preserved), `pause/
-toggle` = set/cycle pause, `restart` = seek 0. The daemon quits mpv once everything is
-rendered AND mpv's own reported playlist-count confirms it has actually finished playing
-(see the `append-play`/`COUNTFILE` gotchas in §5 — both were real, confirmed-live bugs, not
-theoretical).
+toggle` = set/cycle pause, `restart` = seek 0, `volume <n>` = set volume (`cmd_volume`). The
+daemon quits mpv once everything is rendered AND mpv's own reported playlist-count confirms it
+has actually finished playing (see the `append-play`/`COUNTFILE` gotchas in §5 — both were real,
+confirmed-live bugs, not theoretical).
 
 **First-chunk streaming (`STREAM_FIRST_CHUNK=1`, default; Qwen3 on a GPU device only).** Chunk 0
 is not rendered to a WAV first. `stream_first_chunk` makes `$RUN_DIR/s00000.pcm` a **FIFO**,
@@ -192,6 +197,7 @@ not targets. Paragraph breaks are not boundaries for merging into chunk 0.
 | `NORMALIZE_LOUDNESS` | `1` | `0` disables the `htts_wav.py` loudness step (and the gain of streamed chunks). |
 | `STREAM_FIRST_CHUNK` | `1` | `1` plays the first chunk while Qwen3 still generates it (GPU devices only; CPU builds never stream) and chunks it long (≤200 characters); `0` = render a short first chunk (≤90) whole first. |
 | `STREAM_START_TIMEOUT` / `STREAM_IDLE_TIMEOUT` | 5 / 5 | Seconds a stream may wait for its first audio / for more audio before the chunk falls back to the normal render (first) or is kept as partial (later). |
+| `VOLUME` | `100` | Reader volume 0–100 (`volume`), mpv's own mixer on top of the system volume; junk → 100. Capped at 100: normalised speech (≈ −21 dBFS RMS, peaks near full scale) would clip, and an mpv lavfi limiter could not be driven live through `af-command` (mpv 0.41). |
 | `VOICE_<lang>`, `FALLBACK_VOICE`, `KEY_<action>`, `DEFAULT_SPEED`, `PIPER_BIN`, `MPV_BIN` | – | 1.x keys (Piper voices, shortcuts, tools). |
 
 Test seams and overrides (environment variables, none needed in normal use):
@@ -208,6 +214,8 @@ Test seams and overrides (environment variables, none needed in normal use):
 | `HTTS_LID_MODEL` | Explicit fastText model path (tests, packaging). |
 | `HTTS_DEPS_PYTHON` | Interpreter used to create the helper venv (e.g. a `python3.13`). |
 | `HTTS_PY_DIR` | Directory with the `htts_*.py` helpers (tests, odd layouts). |
+| `HYPRLAND_TTS_ENGINE` | `qwen3` / `piper`; set by `preview --engine`, inherited by the detached `__daemon`; beats `ENGINE` in `engine_selected`. |
+| `HYPRLAND_TTS_PIPER_MODEL` | Absolute `.onnx` path set by `preview --model`, inherited by `__daemon`; `preview_model_for`/`model_for_lang` use it only when its directory equals the chunk language, and `piper_render` then skips `remember_model`. |
 | `HYPRLAND_TTS_LIB`, `HYPRLAND_TTS_CLI`, `HYPRLAND_TTS_ALLOW_ROOT` | Library dir (dispatcher), CLI path (GUI), root-guard escape hatch (CI only). |
 
 ---
@@ -249,6 +257,13 @@ Test seams and overrides (environment variables, none needed in normal use):
   normalisation (`NORMALIZE_LOUDNESS`).
 - **GUI 2.0** — ✅ Engine / Voices / Language / Shortcuts pages; async install with log + cancel;
   licence-consent gate for cloned voices; headless tests in `tests/gui/`.
+- **Reader volume** — ✅ `player.sh::cmd_volume` (`volume [<0-100>]`, `VOLUME`, live via mpv IPC,
+  capped at 100), `volume=` in `ctl status`; GUI *Voices* → *Playback* (slider + Stop).
+- **Voice preview** — ✅ `preview.sh::cmd_preview`: sample sentence for de en fr es it pt ru zh ja
+  ko through the normal player, language fixed; `--engine` / `--model` via the env overrides in §2;
+  GUI ▶ buttons on the neural voice-per-language rows and installed Piper voices.
+- **Own audio identity (real-world fix)** — ✅ the reader was silent/very quiet: as plain `mpv` it
+  shared WirePlumber's stored volume with every mpv on the system (see §5).
 - **Pending / coming from the engine side** — `engine variant base|customvoice` (GUI "Switch
   model" already calls it), a "loading voice…" notification while the worker loads, a selection
   size cap. The README mentions all three; verify wording against the final CLI.
@@ -473,6 +488,16 @@ Test seams and overrides (environment variables, none needed in normal use):
   user configs) in `daemon_start_mpv`; `test_player.sh::case_mpv_ignores_desktop_media_control`
   pins both flags. Diagnose with `dbus-monitor "interface='org.mpris.MediaPlayer2.Player'"` and
   `GetConnectionUnixProcessID` on the sender.
+- **The reader keeps its own audio identity — never let it share the generic `mpv` stream key.**
+  Confirmed live: as plain `mpv` (`application.id = mpv`) the reader shared WirePlumber's stored
+  per-application volume (`~/.local/state/wireplumber/stream-properties`, key
+  `Output/Audio:application.id:mpv`) with every other mpv, so a video turned down in the mixer left
+  the reader near silent. Language detection was suspected first (it had just been installed), but
+  detection (`de`), the rendered audio (≈ −21 dBFS RMS) and the stream (uncorked, unmuted) were
+  fine. Fix: `daemon_start_mpv` passes `--audio-client-name="$PLAYER_CLIENT_NAME"`
+  (`hyprland-tts`; becomes application.id/name and node.name). Diagnose with
+  `pactl list sink-inputs` while it speaks: `application.name = "hyprland-tts"`, `Corked: no`,
+  `Mute: no`, a sane volume. The reader's own level is `VOLUME`; never boost above 100.
 - **mpv's `loadfile … append` does not resume playback once mpv has gone idle — you need
   `append-play`.** Confirmed empirically against a live mpv instance: after mpv drains its
   playlist and reports `idle-active: true`, appending another file with plain `append`
@@ -596,9 +621,19 @@ Test seams and overrides (environment variables, none needed in normal use):
     `silent_first=<n>` counts the streamed request, so `silent_first=1` silences only the stream
     and lets the fallback request succeed.
 - **XDG compliance**; **idempotent** setup (2× setup → 1 source line; uninstall → 0 refs).
-- **Keep core shortcuts as defaults** (`SUPER+A`, `SUPER+ESCAPE`); playback controls default
-  to `SUPER+ALT+…`. Hover is intentionally not bound/shown in UI for now. Exposed
+- **An add-on never takes the desktop's keys.** No default shortcut may collide with an Omarchy
+  default bind — never "fix" a clash by unbinding or overriding Omarchy. Defaults: start/stop/
+  replay on `SUPER+ALT` (`A`, `ESCAPE`, `R`), live playback controls on `SUPER+CTRL+ALT` (arrows,
+  `space`). The 1.x defaults (`SUPER+A`, `SUPER+ESCAPE`, `SUPER+ALT+arrows/space`) clashed with
+  Omarchy 4's *Select all*, *System menu*, group moves and *Apps*. Guard:
+  `tests/data/omarchy-default-binds.txt` (refresh with `make omarchy-snapshot` when Omarchy changes
+  its bindings) + `case_defaults_avoid_omarchy_binds`; `setup` warns about every shared combo
+  (`keybind_report_conflicts`). Hover is intentionally not bound/shown in UI for now. Exposed
   shortcuts are user-rebindable via `keybind`.
+- **One install only.** A pacman package and a `~/.local` copy side by side means two versions:
+  `/usr/bin` wins on Hyprland's PATH, so keybinds and the menu ran the old one, and the old GUI's
+  `keybind list` regenerated `tts.lua` with old defaults. `install-tts.sh` refuses
+  (`check_no_other_install`), `setup` warns (`setup_report_other_installs`).
 - **Update docs with code:** README (users, incl. the troubleshooting section — every fix or
   debug session documents its errors there), this Agent.md (agents), `CHANGELOG.md`,
   `THIRD_PARTY.md` (licences/attribution) and `docs/PLAN-2.0.md` (status).
@@ -631,7 +666,7 @@ the developer's real `~/.cache/hyprland-tts`. `tests/lib/test_helpers.sh::test_s
 standalone sandboxes now export it; reproduce CI locally with
 `env -u XDG_CACHE_HOME -u XDG_RUNTIME_DIR … bash tests/run.sh`.
 
-**GUI tests (`tests/gui/test_gui.py`, 70 tests).** The module is skipped when PyGObject, GTK4,
+**GUI tests (`tests/gui/test_gui.py`, 91 tests).** The module is skipped when PyGObject, GTK4,
 libadwaita or `gtk4-broadwayd` are missing. It starts a private **Broadway** daemon
 (`gtk4-broadwayd :N`, `GDK_BACKEND=broadway`, `WAYLAND_DISPLAY`/`DISPLAY` removed) so no window can
 ever appear on the live desktop, imports `gui/hyprland-tts-gui` as a module and drives widgets
@@ -671,6 +706,12 @@ scratch `$HOME` and fakes on `PATH`. Status of what's been exercised:
 - **mpv player** — **real mpv (via a `--ao=null`-injecting fakebin wrapper — see the audio
   gotcha in §5) + socat + fake Piper WAVs**: speak → next/prev (instant), faster/slower
   (live speed 1.2/0.8, no restart), pause/resume, stop → clean, no orphans. *(Verified.)*
+- **Reader audio identity** — root cause of "reader silent/very quiet" verified live on the
+  desktop: WirePlumber's `stream-properties` held one `application.id:mpv` volume for every mpv;
+  language detection, render level and stream state were ruled out (§5). Guarded by
+  `test_player.sh` (mpv argv carries `--audio-client-name=hyprland-tts` and `--volume`; `volume 40`
+  changes a live reader) and `test_preview.sh` (forced language/engine/voice, error paths); the
+  real mixer entry is a manual check after a change: `pactl list sink-inputs` while it speaks.
 - **`append-play` fix + `COUNTFILE` completion check** — reproduced the actual bug with a
   fake Piper that deliberately sleeps 2.5s on one chunk out of three, and an authoritative
   timestamped log of real synthesis start/end times cross-referenced against `ctl status`
@@ -685,7 +726,7 @@ scratch `$HOME` and fakes on `PATH`. Status of what's been exercised:
   extension). *(Verified.)*
 - **Setup/uninstall** — idempotent wiring round-trip. *(Verified.)*
 - **Packaging** — `make install` layout (incl. `lib/`), and a real `makepkg` build. *(Verified.)*
-- **GUI** — ✅ headless Broadway test suite (`tests/gui`, 70 tests, mutation-checked) plus a
+- **GUI** — ✅ headless Broadway test suite (`tests/gui`, 91 tests, mutation-checked) plus a
   smoke run of all four pages against the real CLI in an isolated `HOME`. **Not** click-through
   tested on a real Wayland session (never pop windows on the live desktop): visual layout,
   Wayland focus behaviour and the file chooser portal are unverified.
@@ -768,14 +809,16 @@ hyprland-tts/
 │   ├── engine.sh  qwen3.sh  qwen3_install.sh  worker.sh  voices.sh  pyenv.sh   # 2.0 engine layer
 │   ├── stream.sh                    # first-chunk streaming (FIFO entry + htts_stream.py pump)
 │   ├── player.sh  setup.sh  hover.sh  hover-read.py   # hover: AT-SPI, not sourced, exec'd
+│   ├── preview.sh                   # voice preview (sample sentences, cmd_preview)
 │   └── py/                          # htts_*.py text helpers + requirements.txt (helper venv)
 ├── gui/hyprland-tts-gui             # GTK4/libadwaita: Engine, Voices, Language, Shortcuts (thin CLI front end)
 ├── share/
 │   ├── applications/hyprland-tts.desktop
 │   ├── voices/<name>/               # shipped voice packs (ref.wav/.txt/.spk/.rvq, ATTRIBUTION.md)
 │   └── tts.conf.sample              # reference copy (real file is generated)
-├── tests/                           # test_*.sh bash suites, lib/ helpers, py/ (pytest), gui/ (Broadway)
+├── tests/                           # test_*.sh bash suites, lib/ helpers, py/ (pytest), gui/ (Broadway), data/
 ├── tools/qa/                        # vendored coding-standard gate (qa-precheck.py, comment-runs.py)
+├── tools/omarchy-binds.py           # snapshot of Omarchy's default binds (make omarchy-snapshot)
 ├── docs/PLAN-2.0.md                 # 2.0 plan, research numbers, work-package status
 ├── install-tts.sh / uninstall-tts.sh  # local (~/.local) installer for git-checkout users
 ```

@@ -125,6 +125,9 @@ USAGE
   hyprland-tts speak                 Speak selection (or a clipboard image)
   hyprland-tts hover                 Speak text under the mouse cursor (AT-SPI, best-effort)
   hyprland-tts stop                  Stop playback (the warm engine worker keeps running)
+  hyprland-tts volume [<0-100>]      Show or set the reader volume (applies at once)
+  hyprland-tts preview <lang>        Speak a sample sentence of <lang> (try out a voice)
+                                     [--engine qwen3|piper] [--model <lang>/<name>]
   hyprland-tts ctl <cmd>             next|prev|restart|faster|slower|
                                      pause|resume|toggle|stop|status
   hyprland-tts engine <sub>          status [--porcelain]|install qwen3 [--cpu|--vulkan]
@@ -183,6 +186,8 @@ main() {
     __worker)   run_worker ;; # internal: the detached warm-engine worker
     ctl)        cmd_ctl "$@" ;; # playback controls via mpv IPC
     stop)       cmd_stop ;; # stop playback only
+    volume)     cmd_volume "$@" ;; # show or set the reader volume
+    preview)    cmd_preview "$@" ;; # speak a sample sentence of one language
     engine)     cmd_engine "$@" ;; # engine install/selection/worker
     voice)      cmd_voice "$@" ;; # voice choice and cloning
     deps)       command_deps "$@" ;; # language-ID environment
@@ -206,7 +211,7 @@ export HTTS_SELF="$_self"
 source "$LIBDIR/common.sh"
 # Module order matters only for readability: every module defines functions, nothing runs.
 for _m in text router model image keybind engine qwen3 qwen3_install worker voices pyenv stream \
-  player setup hover; do
+  player setup hover preview; do
   # shellcheck source=/dev/null
   source "$LIBDIR/$_m.sh"
 done

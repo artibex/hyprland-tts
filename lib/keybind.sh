@@ -192,8 +192,12 @@ function grab(record, pattern, strip,   value) {
   desc = grab($0, "\"description\": *\"[^\"]*\"", ".*: *\"")
   # Our own binds are skipped: legacy exec binds name the command in arg, Lua binds carry the
   # "@tts:<action>" marker in description (their arg is a numeric id).
-  if (m == mask && tolower(k) == tolower(key) && a !~ /hyprland-tts/ && desc !~ /@tts:/)
-    printf "%s %s -> %s %s\n", m, k, d, a
+  if (m == mask && tolower(k) == tolower(key) && a !~ /hyprland-tts/ && desc !~ /@tts:/) {
+    # Lua binds only show a numeric id, so the description (if any) tells people what it is.
+    line = sprintf("%s %s -> %s %s", m, k, d, a)
+    if (desc != "") line = line " (" desc ")"
+    print line
+  }
 }
 AWK
 }
@@ -213,6 +217,26 @@ keybind_conflicts() {
   # Records are split at "}" so each bind object is one awk record.
   hyprctl binds -j 2>/dev/null |
     awk -v RS='}' -v mask="$mask" -v key="$key" -f <(keybind_awk_program)
+}
+
+# keybind_report_conflicts — warn about every shortcut whose combo another live bind also uses.
+# Args:    none
+# Returns: 0 always; stderr: one warning block per shared combo (nothing when all are free)
+# Globals: reads ACTION_ORDER, ACTION_LABEL
+# Notes:   A shared combo runs the other bind too (or instead), never just the reader.
+keybind_report_conflicts() {
+  local action combo conflict
+  for action in "${ACTION_ORDER[@]}"; do
+    # Each shortcut is checked against the live binds Hyprland reports.
+    combo="$(key_for_action "$action")"
+    conflict="$(keybind_conflicts "$combo")"
+    # A free combo needs no word.
+    [ -n "$conflict" ] || continue
+    # A shared one names the other binds (indented under the headline) and the fix.
+    log "warning: ${ACTION_LABEL[$action]} ($combo) is also bound by:"
+    printf '%s\n' "$conflict" | sed 's/^/           /' >&2
+    log "         Choose a free key: hyprland-tts keybind set $action \"MODS, KEY\""
+  done
 }
 
 # keybind_refresh_files — regenerate tts.conf/tts.lua and reload Hyprland only if they changed.

@@ -230,4 +230,95 @@ case_mpv_ignores_desktop_media_control() {
     "mpv keep-open is forced off"
 }
 
+# case_mpv_has_own_client_name_and_volume — the reader's stream is not "mpv" and starts at VOLUME.
+# Args:    none
+# Returns: 0 always
+# Globals: reads TEST_ROOT
+case_mpv_has_own_client_name_and_volume() {
+  test_add_piper_voice de
+  test_set_config "VOLUME=55"
+  speak_and_wait "Ein kurzer Satz."
+  local argv; argv="$(cat "$TEST_ROOT/mpv-argv.log" 2>/dev/null)"
+  # As plain "mpv" WirePlumber gave the reader the volume stored for every other mpv (videos).
+  assert_contains "$argv" "--audio-client-name=hyprland-tts" "mpv has its own client name"
+  assert_contains "$argv" "--volume=55" "mpv starts at the configured volume"
+  assert_eq "55" "$(htts volume)" "volume shows the stored value"
+}
+
+# case_junk_volume_falls_back_to_full — a hand-edited junk VOLUME plays at 100, never fails.
+# Args:    none
+# Returns: 0 always
+# Globals: reads TEST_ROOT
+case_junk_volume_falls_back_to_full() {
+  test_add_piper_voice de
+  test_set_config "VOLUME=loud"
+  speak_and_wait "Ein kurzer Satz."
+  assert_rc 0 "$?" "player finished"
+  assert_contains "$(cat "$TEST_ROOT/mpv-argv.log" 2>/dev/null)" "--volume=100" "junk -> 100"
+  assert_eq "100" "$(htts volume)" "volume shows 100 for junk"
+  test_set_config "VOLUME=250"
+  assert_eq "100" "$(htts volume)" "volume shows 100 above the cap"
+}
+
+# case_volume_default_and_leading_zero — 100 without a config; "070" is stored as 70.
+# Args:    none
+# Returns: 0 always
+# Globals: reads XDG_CONFIG_HOME
+case_volume_default_and_leading_zero() {
+  local out
+  assert_eq "100" "$(htts volume)" "default volume"
+  htts volume >/dev/null 2>&1
+  assert_rc 0 "$?" "volume query"
+  out="$(htts volume 070 2>&1)"
+  assert_rc 0 "$?" "volume 070"
+  assert_eq "volume: 70%" "$out" "confirmation line"
+  assert_contains "$(cat "$XDG_CONFIG_HOME/piper-tts/config")" "VOLUME=70" "stored without the zero"
+  assert_eq "70" "$(htts volume)" "stored value read back"
+  htts volume 0 >/dev/null 2>&1
+  assert_eq "0" "$(htts volume)" "zero is a valid volume"
+}
+
+# case_invalid_volumes_fail — out of range, signed, non-numeric, empty or extra arguments fail.
+# Args:    none
+# Returns: 0 always
+# Globals: reads XDG_CONFIG_HOME
+case_invalid_volumes_fail() {
+  local bad out
+  htts volume 30 >/dev/null 2>&1
+  for bad in 101 -1 abc "" 1.5 1000 "+5"; do
+    out="$(htts volume "$bad" 2>&1 >/dev/null)"
+    assert_rc 1 "$?" "volume '$bad' rejected"
+    assert_contains "$out" "invalid volume" "volume '$bad' explains the range"
+  done
+  htts volume 40 50 >/dev/null 2>&1
+  assert_rc 1 "$?" "two values rejected"
+  assert_eq "30" "$(htts volume)" "the stored value survived every bad call"
+}
+
+# test_status_shows_volume — succeed once the live player reports a given volume.
+# Args:    $1 <volume>
+# Returns: 0 when `ctl status` contains volume=<n>; 1 otherwise
+# Globals: none
+test_status_shows_volume() { [[ "$(htts ctl status)" == *"volume=$1" ]]; }
+
+# case_volume_changes_a_live_player — `volume 40` reaches the running mpv at once.
+# Args:    none
+# Returns: 0 always
+# Globals: reads FAKE_SELECTION, FAKE_TTS_CONTROL, XDG_CONFIG_HOME
+case_volume_changes_a_live_player() {
+  test_install_fake_engine
+  echo "dur=6" > "$FAKE_TTS_CONTROL"
+  printf '%s' "$TWO_PARAGRAPHS" > "$FAKE_SELECTION"
+  htts speak >/dev/null 2>&1
+  test_wait_until 20 test_status_has_two_items
+  assert_contains "$(htts ctl status)" " volume=100" "status reports the start volume"
+  local out; out="$(htts volume 40)"
+  assert_rc 0 "$?" "volume 40 on a live player"
+  assert_eq "volume: 40%" "$out" "confirmation line"
+  test_wait_until 3 test_status_shows_volume 40
+  assert_rc 0 "$?" "live player now at volume=40"
+  assert_contains "$(cat "$XDG_CONFIG_HOME/piper-tts/config")" "VOLUME=40" "value stored"
+  htts stop >/dev/null 2>&1
+}
+
 test_run_cases

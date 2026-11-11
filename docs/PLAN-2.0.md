@@ -75,6 +75,13 @@ selection ─► normalize (per language: numbers, dates, currency, abbreviation
    - ✅ **4c — first-sentence streaming:** `lib/stream.sh` + `lib/py/htts_stream.py`; real engine
      `speak` → first sound 2.6 s → 1.0 s warm (details, measurements and gotchas in README
      *Latency* and Agent.md).
+   - ✅ **4d — Omarchy-safe default shortcuts:** no default collides with an Omarchy 4 bind
+     (`SUPER+ALT` start/stop/replay, `SUPER+CTRL+ALT` playback controls); snapshot guard
+     `tests/data/omarchy-default-binds.txt` (`make omarchy-snapshot`), `setup` conflict warning.
+   - ✅ **4e — reader volume, voice preview, own audio identity:** `hyprland-tts volume [<0-100>]`
+     (`VOLUME`, live over mpv IPC, capped at 100), `hyprland-tts preview <lang>` (`lib/preview.sh`),
+     GUI *Playback* group and ▶ buttons; mpv runs as `--audio-client-name=hyprland-tts`, so it no
+     longer shares WirePlumber's stored `mpv` volume (fix for a silent/very quiet reader).
    - 🔄 **4a — coding standards for every script, bash/pytest suites, CI (shellcheck, tests, QA
      gate):** tracked by the engine/bash polish work (`tools/qa`, `make qa`).
 

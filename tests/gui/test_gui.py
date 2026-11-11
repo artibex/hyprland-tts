@@ -98,7 +98,7 @@ MODEL_CATALOG = (
     "en-ryan\ten\ten_US-ryan-high\thigh\t0\tEnglish Ryan\n"
 )
 # Two shortcut rows as `keybind list --porcelain` prints them.
-KEYBIND_LIST = "speak\tSpeak selection\tSUPER, A\nstop\tStop speech\tSUPER, ESCAPE\n"
+KEYBIND_LIST = "speak\tSpeak selection\tSUPER ALT, A\nstop\tStop speech\tSUPER ALT, ESCAPE\n"
 # Dependency status with everything missing, as on a fresh install.
 DEPS_MISSING = "python=\nmodel=\nsystem_packages=0\nready=0\n"
 
@@ -441,6 +441,8 @@ def fake(tmp_path, monkeypatch):
     # Missing helpers exit with 1, exactly like the real `deps status`.
     handle.respond("deps", "status", "--porcelain", stdout=DEPS_MISSING, rc=1)
     handle.respond("keybind", "list", "--porcelain", stdout=KEYBIND_LIST)
+    # The reader plays at full volume until a test says otherwise.
+    handle.respond("volume", stdout="100\n")
     return handle
 
 
@@ -684,6 +686,25 @@ def test_formatting_helpers(gui):
     assert gui.language_title("xx") == "XX"
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [("40\n", 40), ("100", 100), ("0\n", 0), ("150\n", None), ("-5\n", None),
+     ("loud\n", None), ("", None)],
+)
+def test_parse_volume_accepts_only_whole_percentages(gui, text, expected):
+    """The volume query yields 0-100; anything else is reported as unusable."""
+    assert gui.parse_volume(text) == expected
+
+
+def test_neural_sample_blocker_names_the_obstacle(gui):
+    """A sample needs an installed engine and a voice; the reason says which is missing."""
+    assert "Install Qwen3-TTS" in gui.neural_sample_blocker(False, "de-thorsten")
+    # The engine check comes first, because without it no voice can help.
+    assert "Install Qwen3-TTS" in gui.neural_sample_blocker(False, "")
+    assert "No voice" in gui.neural_sample_blocker(True, "")
+    assert gui.neural_sample_blocker(True, "de-thorsten") == ""
+
+
 def test_accel_to_combo(gui):
     """Key events become Hyprland combos; lone modifiers are rejected."""
     from gi.repository import Gdk
@@ -774,7 +795,8 @@ def test_cli_job_escalates_to_sigkill(gui, fake, monkeypatch):
 def test_window_builds_four_pages_and_refreshes_every_page(gui, application, fake):
     """Construction creates all pages and the first refresh queries each data source."""
     window = gui.TtsWindow(application)
-    pump(lambda: len(fake.calls()) >= 7)
+    # Eight queries: engine 1, voices 5 (including the volume), language 1, shortcuts 1.
+    pump(lambda: len(fake.calls()) >= 8)
     calls = fake.calls()
     # The calls were captured first, so the teardown cannot add to the list.
     window.destroy()
@@ -783,7 +805,7 @@ def test_window_builds_four_pages_and_refreshes_every_page(gui, application, fak
     for expected in (
         ["engine", "status", "--porcelain"], ["voice", "list", "--porcelain"],
         ["model", "list", "--porcelain"], ["model", "catalog", "--porcelain"],
-        ["deps", "status", "--porcelain"], ["keybind", "list", "--porcelain"],
+        ["deps", "status", "--porcelain"], ["keybind", "list", "--porcelain"], ["volume"],
     ):
         assert expected in calls
 
@@ -1080,6 +1102,178 @@ def test_attribution_dialog_shows_file_text(window, dialogs, tmp_path, monkeypat
     assert any("No attribution file" in text for text in texts)
 
 
+# ----------------------------------------------------------------------------------------
+# Voices page: playback (volume, stop, samples)
+# ----------------------------------------------------------------------------------------
+
+
+def volume_writes(fake):
+    """List the `volume <n>` calls, leaving out the read-only `volume` queries.
+
+    Args:
+        fake: The FakeCli.
+
+    Returns:
+        List of argument lists.
+    """
+    return [call for call in fake.calls() if call[0] == "volume" and len(call) > 1]
+
+
+def wait_for_volume_query(window, fake):
+    """Re-query the voices page and wait until its volume answer was rendered.
+
+    Args:
+        window: The TtsWindow.
+        fake: The FakeCli.
+
+    Returns:
+        None.
+    """
+    window.pages["voices"].refresh()
+    wait_for_call(fake, ["volume"])
+    # The volume is the last query of the batch; a short pump delivers the render.
+    pump_for(0.3)
+
+
+def test_playback_group_leads_the_page_and_shows_the_queried_volume(window, fake):
+    """The slider shows the CLI's volume, and setting it from a query sends nothing back."""
+    page = window.pages["voices"]
+    # Playback is the first group of the page, above the neural voices.
+    assert page.content.get_first_child() is page.playback
+    assert page.playback.volume_scale.get_value() == 100
+    # A refresh now reads a lowered volume from the CLI.
+    fake.respond("volume", stdout="40\n")
+    page.refresh()
+    pump(lambda: page.playback.volume_scale.get_value() == 40)
+    # The value label next to the slider reads as a percentage.
+    labels = [widget.get_label() for widget in iter_widgets(page.playback.volume_scale)
+              if hasattr(widget, "get_label")]
+    assert "40%" in labels
+    # Longer than the debounce: a programmatic update must never become a `volume <n>` call.
+    pump_for(0.6)
+    assert volume_writes(fake) == []
+
+
+@pytest.mark.parametrize("answer_fields", [
+    {"stderr": "error: unknown command 'volume'\n", "rc": 1},
+    {"stdout": "loud\n"},
+])
+def test_unusable_volume_query_keeps_the_slider_quietly(window, fake, toasts, answer_fields):
+    """A failed or garbled `volume` query leaves the slider at 100 without a toast."""
+    fake.respond("volume", **answer_fields)
+    wait_for_volume_query(window, fake)
+    # Nothing was readable, so the slider still shows the full volume.
+    assert window.pages["voices"].playback.volume_scale.get_value() == 100
+    assert toasts == [] and volume_writes(fake) == []
+
+
+def test_moving_the_slider_sends_one_debounced_volume_call(window, fake, toasts):
+    """Quick moves collapse into one `volume <n>` with the last value; no lock, no refresh."""
+    fake.respond("volume", sleep=0.6)
+    scale = window.pages["voices"].playback.volume_scale
+    # Three moves well inside the debounce window.
+    for value in (30, 55, 70):
+        scale.set_value(value)
+    pump_for(0.1)
+    # Still inside the debounce window, nothing has been sent yet.
+    assert volume_writes(fake) == []
+    wait_for_call(fake, ["volume", "70"])
+    # The slow command is running now, yet the window stays unlocked.
+    assert window._busy is False
+    pump_for(1.0)
+    # Exactly one call reached the CLI, and no page re-query followed it.
+    assert fake.calls() == [["volume", "70"]]
+    assert toasts == []
+
+
+def test_pending_slider_move_wins_over_an_older_volume_query(window, fake):
+    """A query answer arriving mid-debounce does not snap the slider back."""
+    playback = window.pages["voices"].playback
+    playback.volume_scale.set_value(30)
+    # The stale answer of a refresh that started before the user moved the slider.
+    playback.set_volume(80)
+    assert playback.volume_scale.get_value() == 30
+    assert wait_for_call(fake, ["volume", "30"]) == ["volume", "30"]
+
+
+def test_failing_volume_change_toasts_the_cli_error(window, fake, toasts):
+    """A rejected volume is reported with the CLI's own message."""
+    fake.respond("volume", "55", stderr="error: could not reach the audio server\n", rc=1)
+    window.pages["voices"].playback.volume_scale.set_value(55)
+    # The error line arrives without its "error:" prefix.
+    pump(lambda: "could not reach the audio server" in toasts)
+
+
+def test_stop_button_runs_stop_without_locking(window, fake, toasts):
+    """Stop runs `stop` as a quick command that neither locks nor refreshes the window."""
+    fake.respond("stop", sleep=0.4)
+    find_button(window.pages["voices"].playback, tooltip="Stop playback").emit("clicked")
+    assert wait_for_call(fake, ["stop"]) == ["stop"]
+    # The command is still running, but the window stays usable.
+    assert window._busy is False
+    pump_for(0.8)
+    assert fake.calls() == [["stop"]] and toasts == []
+
+
+def test_neural_sample_button_maps_to_preview(window, fake, toasts):
+    """▶ on a language row runs `preview <lang> --engine qwen3` and names the language."""
+    german = find_row(window.pages["voices"], "German (de)")
+    find_button(german, tooltip="Play a sample").emit("clicked")
+    assert wait_for_call(fake, ["preview"]) == ["preview", "de", "--engine", "qwen3"]
+    # The success toast names the language whose voice is speaking.
+    pump(lambda: "Playing sample: German (de)" in toasts)
+    # The click neither changed the voice nor started a page refresh.
+    assert german.get_selected() == 1
+    assert fake.calls() == [["preview", "de", "--engine", "qwen3"]]
+
+
+def test_neural_sample_button_is_disabled_without_a_voice(window):
+    """A language without a voice gets an insensitive ▶ that explains why."""
+    french = find_row(window.pages["voices"], "French (fr)")
+    button = find_button(french, tooltip="No voice is available for this language")
+    # The button exists but cannot be clicked.
+    assert button is not None and not button.get_sensitive()
+    assert find_button(french, tooltip="Play a sample") is None
+
+
+def test_neural_sample_button_is_disabled_without_qwen3(window, fake):
+    """Without an installed engine every ▶ is insensitive; building rows calls nothing."""
+    fake.respond("engine", "status", "--porcelain",
+                 stdout="selected=auto\nactive=piper\nqwen3_installed=0\nqwen3_variant=base\n"
+                 "languages=de,en\n")
+    # The re-render picks up the engine that is now missing.
+    page = window.pages["voices"]
+    page.refresh()
+    pump(lambda: find_row(page, "Qwen3-TTS is not installed") is not None)
+    # Even the German row, which has a voice, cannot play without the engine.
+    button = find_button(find_row(page, "German (de)"),
+                         tooltip="Install Qwen3-TTS on the Engine tab to play a sample")
+    assert button is not None and not button.get_sensitive()
+    pump_for(0.4)
+    # Rendering the rows ran only the page queries, never a preview.
+    assert not [call for call in fake.calls() if call[0] == "preview"]
+
+
+def test_piper_sample_button_maps_to_preview_with_model(window, fake, toasts):
+    """▶ on an installed Piper voice passes its language and model id."""
+    row = find_row(window.pages["voices"], "thorsten (high)")
+    find_button(row, tooltip="Play a sample").emit("clicked")
+    # The model id is exactly the one the other `model` commands use.
+    assert wait_for_call(fake, ["preview"]) == [
+        "preview", "de", "--engine", "piper", "--model", "de/de_DE-thorsten-high"]
+    pump(lambda: "Playing sample: thorsten (high)" in toasts)
+
+
+def test_failing_preview_toasts_the_cli_error(window, fake, toasts):
+    """A preview the CLI refuses shows its message instead of the "Playing" toast."""
+    fake.respond("preview", stderr="error: no sample sentence for language 'xx'\n", rc=1)
+    window.pages["voices"].neural.on_play_sample("xx")
+    pump(lambda: "no sample sentence for language 'xx'" in toasts)
+    # Success text must not appear for a failed preview.
+    assert not any(message.startswith("Playing sample") for message in toasts)
+    assert window._busy is False
+
+
 def test_neural_section_shows_error_when_listing_fails(window, fake):
     """A failing `voice list` replaces the groups with an explanatory row."""
     fake.respond("voice", "list", "--porcelain", stderr="error: voices unavailable\n", rc=1)
@@ -1302,7 +1496,7 @@ def test_shortcut_rows_are_rendered(window):
     """Each shortcut triple becomes a row with its combo on the button."""
     row = find_row(window.pages["keys"], "Speak selection")
     assert row.get_subtitle() == "speak"
-    assert find_button(row, label="SUPER, A") is not None
+    assert find_button(row, label="SUPER ALT, A") is not None
 
 
 def test_rebind_without_conflict_sets_the_key(window, fake):
@@ -1427,6 +1621,15 @@ def test_real_voice_list_and_deps_status_parse(gui, real_cli):
         # Older checkouts lack the machine-readable deps output.
         pytest.skip("the CLI has no deps status --porcelain yet")
     assert gui.parse_deps_status(deps.stdout).known
+
+
+def test_real_volume_query_parses(gui, real_cli):
+    """`volume` of the real CLI prints a percentage the slider can show."""
+    result = gui.run_cli(["volume"], timeout=30)
+    if result.returncode != 0:
+        pytest.skip("the CLI in this checkout has no volume command yet")
+    # A fresh isolated HOME has no stored volume, so the full default is reported.
+    assert gui.parse_volume(result.stdout) == 100
 
 
 def test_switch_model_maps_to_engine_variant(window, fake):

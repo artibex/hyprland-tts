@@ -35,6 +35,11 @@ engine stays as a fast fallback. 100% offline: no cloud, no telemetry, no perman
 - **Smart playback that responds instantly** — next/previous sentence, replay, speed up/down
   and pause/resume while text is read. Playback runs through **mpv**, so speed changes are
   pitch-preserving and skipping is instant.
+- **Own volume, own mixer entry** — the reader appears as `hyprland-tts` in the system mixer
+  (not as a generic `mpv`), and `hyprland-tts volume <0-100>` or the GUI slider sets its volume
+  on top of the system volume, live while it speaks.
+- **Voice preview** — `hyprland-tts preview <lang>` (or the ▶ buttons in the GUI) speaks a
+  sample sentence with the voice a language would get, or with one installed Piper voice.
 - **Voiceover text cleanup** — markdown, decorative symbols and stray markup are removed;
   **source code gets its own cleanup** (operators become words, identifiers are split,
   braces become pauses). Classified per paragraph.
@@ -47,8 +52,9 @@ engine stays as a fast fallback. 100% offline: no cloud, no telemetry, no perman
 - **Speak whatever is under your mouse cursor** *(optional, on-demand, CLI-only)* —
   `hyprland-tts hover`, via AT-SPI.
 - **Graphical manager** — GTK4 / libadwaita app with four pages: **Engine** (status, choose
-  engine, install with live log and cancel, worker control), **Voices** (voice per language,
-  cloned voices with licence confirmation, Piper voices), **Language** (language-detection
+  engine, install with live log and cancel, worker control), **Voices** (volume and stop, voice
+  per language, cloned voices with licence confirmation, Piper voices, ▶ preview buttons),
+  **Language** (language-detection
   helpers) and **Shortcuts**. Everything is also available on the command line.
 - **Clean install / uninstall** — AUR package; your `hyprland.conf` gets a single
   `source = ~/.config/hypr/tts.conf` line and nothing else.
@@ -79,7 +85,8 @@ engine stays as a fast fallback. 100% offline: no cloud, no telemetry, no perman
 ```bash
 # 1. Install
 yay -S hyprland-tts                      # or: paru -S hyprland-tts
-#    from a git checkout instead: ./install-tts.sh
+#    from a git checkout instead: makepkg -si   (package, preferred)
+#                              or ./install-tts.sh (~/.local) — never both, see Troubleshooting
 
 # 2. Wire the shortcuts into Hyprland (idempotent)
 hyprland-tts setup
@@ -95,7 +102,7 @@ hyprland-tts engine install qwen3 --variant base
 hyprland-tts engine status
 ```
 
-Then highlight some text and press **SUPER + A**. Steps 3 and 4 can also be done from the GUI
+Then highlight some text and press **SUPER + ALT + A**. Steps 3 and 4 can also be done from the GUI
 (`hyprland-tts gui`, tabs *Language* and *Engine*) with a live log and a Cancel button.
 
 Without steps 3 and 4 everything still works with Piper voices
@@ -258,6 +265,24 @@ hyprland-tts model install-url it https://.../it_IT-riccardo-x_low.onnx   # cust
 hyprland-tts model fallback fr/fr_FR-siwis-medium   # voice for undetected language (--clear to unset)
 ```
 
+### Previewing a voice
+
+`hyprland-tts preview <lang>` speaks a built-in sample sentence (de, en, fr, es, it, pt, ru, zh,
+ja, ko) through the normal player, so volume, speed and the stop shortcut apply. The language is
+fixed, no detection runs.
+
+```bash
+hyprland-tts preview de                    # active engine: what the speak shortcut would use
+hyprland-tts preview fr --engine piper     # force an engine (qwen3 or piper)
+hyprland-tts preview de --model de/de_DE-thorsten-high   # one installed Piper voice
+```
+
+`--model` must name a voice of the same language. A preview does not change the "last used"
+voice. It fails with a message for a language without a sample sentence, a language without a
+voice for the engine, `--engine qwen3` when Qwen3 is not usable, and a model of another language.
+In the GUI every neural *voice per language* row and every installed Piper voice has a ▶ button
+(the neural one is disabled when Qwen3 is not installed or the language has no voice).
+
 ---
 
 ## 🌍 Language detection and text preparation
@@ -302,12 +327,19 @@ voice. Longer sentences switch correctly.
 
 | Shortcut | Action |
 | --- | --- |
-| `SUPER + A` | Speak the highlighted selection (or a copied image) |
-| `SUPER + ESCAPE` | Stop speech (the warm engine worker keeps running; `engine stop` frees its RAM) |
-| `SUPER + ALT + →` / `←` | Next / previous sentence |
-| `SUPER + ALT + ↑` / `↓` | Speed up / slow down (live, pitch-preserving) |
-| `SUPER + ALT + Space` | Pause / resume |
+| `SUPER + ALT + A` | Speak the highlighted selection (or a copied image) |
+| `SUPER + ALT + ESCAPE` | Stop speech (the warm engine worker keeps running; `engine stop` frees its RAM) |
+| `SUPER + CTRL + ALT + →` / `←` | Next / previous sentence |
+| `SUPER + CTRL + ALT + ↑` / `↓` | Speed up / slow down (live, pitch-preserving) |
+| `SUPER + CTRL + ALT + Space` | Pause / resume |
 | `SUPER + ALT + R` | Replay current sentence |
+
+**hyprland-tts is an add-on, so its defaults never take a key the desktop already uses.** Start,
+stop and replay sit on `SUPER + ALT`, the live playback controls on `SUPER + CTRL + ALT`; none
+of them is bound by Omarchy 4 (checked against its default bindings by the test suite). The old
+1.x defaults (`SUPER + A`, `SUPER + ESCAPE`, `SUPER + ALT + arrows/Space`) clash with Omarchy's
+*Select all*, *System menu*, group moves and *Apps* — see Troubleshooting. `hyprland-tts setup`
+warns about every shortcut another bind also uses.
 
 `hover` is CLI-only (`hyprland-tts hover`) and intentionally hidden from the Shortcuts UI and
 the default bindings while that feature is stabilised.
@@ -317,8 +349,8 @@ it clashes with another Hyprland bind), or the CLI:
 
 ```bash
 hyprland-tts keybind list
-hyprland-tts keybind set speak "SUPER, B"     # refuses if the combo is taken
-hyprland-tts keybind set speak "SUPER, B" --force
+hyprland-tts keybind set speak "SUPER ALT, B"     # refuses if the combo is taken
+hyprland-tts keybind set speak "SUPER ALT, B" --force
 hyprland-tts keybind reset                    # back to defaults
 ```
 
@@ -332,7 +364,7 @@ runs the CLI, so everything it does can be done in a terminal.
 | Page | What you can do |
 |---|---|
 | **Engine** | See the active engine, why Qwen3 is inactive, compute device and worker state; choose Automatic / Qwen3 / Piper; install Qwen3 (backend and model choice, live log, Cancel); remove it; start/stop the worker; set the idle timeout (1–240 min). |
-| **Voices** | Pick the neural voice per language; add a cloned voice from a WAV and transcript (with mandatory licence/consent confirmation); remove your own voices; read the attribution of shipped voices; manage Piper voices (install, default, fallback, remove, custom URL). |
+| **Voices** | *Playback* group on top: volume slider (applied after a short pause while dragging) and a Stop button. Preview (▶) the neural voice of a language or an installed Piper voice. Pick the neural voice per language; add a cloned voice from a WAV and transcript (with mandatory licence/consent confirmation); remove your own voices; read the attribution of shipped voices; manage Piper voices (install, default, fallback, remove, custom URL). |
 | **Language** | See whether per-sentence detection is ready; install/remove the helpers with a live log; short explanation of the fallback. |
 | **Shortcuts** | Rebind or reset shortcuts with conflict checking. |
 
@@ -344,6 +376,8 @@ Closing the window during an install asks first, because it cancels the install.
 
 ```text
 hyprland-tts speak | hover | stop | ctl <next|prev|restart|faster|slower|pause|resume|toggle|status>
+hyprland-tts volume [<0-100>]                        # show / set the reader volume (live)
+hyprland-tts preview <lang> [--engine qwen3|piper] [--model <lang>/<name>]
 hyprland-tts engine status [--porcelain]
 hyprland-tts engine install qwen3 [--cpu|--vulkan] [--variant base|customvoice]
 hyprland-tts engine remove qwen3
@@ -359,7 +393,13 @@ hyprland-tts keybind list|set|check|reset
 hyprland-tts gui | setup | uninstall | purge | help
 ```
 
-`stop` stops playback only; `engine stop` stops the worker.
+`stop` stops playback only; `engine stop` stops the worker. `ctl status` prints
+`pos=<n>/<count> speed=<x> paused=<bool> volume=<v>` (or `idle`).
+
+`volume` without a value prints the stored volume; with a value it stores it and changes a
+reader that is speaking right now. It is mpv's own volume (a cubic curve like system mixers),
+applied on top of the system volume. It stops at 100 on purpose: speech is loudness-normalised
+to about −21 dBFS RMS with peaks near full scale, so amplification above 100 would clip.
 
 ---
 
@@ -388,6 +428,7 @@ or GUI; every key below can also be set by hand.
 | `FALLBACK_VOICE` | – | Piper voice for undetected languages (`model fallback`). |
 | `KEY_<action>` | built-in | Shortcut override (`keybind set`). |
 | `DEFAULT_SPEED` | `1.0` | Initial playback speed. |
+| `VOLUME` | `100` | Reader volume 0–100 (mpv's own mixer, on top of the system volume; no boost above 100). Set by `volume`; an invalid value counts as `100`. |
 | `PIPER_BIN`, `MPV_BIN` | `piper-tts`, `mpv` | Executables to use. |
 
 Paths: engines `~/.local/share/hyprland-tts/engines/`, your voices
@@ -471,6 +512,26 @@ now starts mpv with `--load-scripts=no` (and `--keep-open=no`, so a user `mpv.co
 end-of-document detection). Media keys therefore do not control the reader; use the
 hyprland-tts shortcuts (`ctl pause|resume|toggle`).
 
+**The reader is silent or very quiet, although other audio works.** Found on the real desktop,
+right after installing language detection, which looked like the cause but was not (German was
+detected as `de`, the rendered audio was ≈ −21 dBFS RMS, the mpv stream was neither corked nor
+muted). The reader's mpv registered with PipeWire as plain `mpv` (`application.id = mpv`), and
+WirePlumber remembers stream volume per application
+(`~/.local/state/wireplumber/stream-properties`, key `Output/Audio:application.id:mpv`). So the
+reader shared one stored volume with every other mpv on the system: a video turned down in the
+mixer turned the reader down too, to near silence. Fixed: mpv starts with
+`--audio-client-name=hyprland-tts`, so the reader has its own mixer entry `hyprland-tts`
+(application id, name and node name) that starts at 100 % and does not follow other mpv players;
+an old `mpv` entry in the mixer no longer affects it. Check while it speaks:
+
+```bash
+pactl list sink-inputs    # the reader: application.name = "hyprland-tts", Corked: no, Mute: no
+hyprland-tts volume       # the reader's own volume (0-100), on top of the mixer entry
+```
+
+The volume shown for that sink input must be sane (not near 0 %). With an older version, raise
+the `mpv` entry in the mixer while the reader speaks.
+
 ### GUI and shortcuts
 
 **`hyprland-tts gui` says GTK4/libadwaita/PyGObject are missing, but they're installed.**
@@ -492,7 +553,7 @@ to the latest package.
 
 ```bash
 hyprland-tts keybind list          # what is really bound (also repairs drift from Hyprland's live state)
-hyprland-tts keybind reset hover   # back to the SUPER+ALT+H default, if you want it
+hyprland-tts keybind reset speak   # back to the SUPER+ALT+A default
 ```
 
 `keybind list` repairs the generated `tts.conf` if you edited the config by hand (that used to
@@ -500,6 +561,40 @@ leave a shortcut silently stuck on an old key). No reboot is ever needed. If a k
 fails because of a missing dependency (Hyprland, AT-SPI, mpv, Piper, socat, a voice model)
 you get a desktop notification instead of silence; "no text found there" for hover means the
 shortcut fired but the app exposes no text through AT-SPI.
+
+**After `./install-tts.sh` the GUI still shows the old shortcuts and the new keys do nothing.**
+Found on the real desktop: the 1.1 pacman package (`/usr/bin`) was still installed next to the
+fresh `~/.local` copy. `/usr/bin` comes before `~/.local/bin` on Hyprland's PATH, so the menu entry
+(`Exec=hyprland-tts gui`) started the **old** GUI, and its `keybind list` regenerated `tts.lua`
+with the old defaults one second after opening (`journalctl --user` shows the `gtk-launch`,
+`tts.lua` the same timestamp). Keybinds then ran the old program on the old keys. Diagnose with
+`type -a hyprland-tts` and `pacman -Q hyprland-tts`. Keep exactly one install: upgrade the
+package from the checkout (`makepkg -si`) and remove the local copy
+(`make PREFIX=$HOME/.local uninstall` in the checkout), then `hyprland-tts setup`. The installer
+now refuses to install next to another one, and `setup` warns when PATH holds several.
+
+**Uninstalling the `~/.local` copy deleted the neural engine and my own voices.** Found while
+cleaning up the case above: for a local install `share/hyprland-tts` *is* the data directory
+(`$XDG_DATA_HOME/hyprland-tts` with `engines/` and `voices/`), and `make uninstall` (also run by
+`./uninstall-tts.sh`) removed it with `rm -rf`, even without purge. Fixed: uninstall removes only
+`shipped-voices/` and leaves the directory when anything else is in it; only `hyprland-tts purge`
+deletes user data.
+
+**`SUPER + A` selects all text (or jumps to the line start) instead of reading aloud.** Seen
+after the upgrade to Omarchy 4: Omarchy now binds `SUPER + A` to *Select all* (it sends
+`Ctrl + A` to the window, `default/hypr/bindings/clipboard.lua`), and the old hyprland-tts
+default sat on the same key: two binds on one combo, and Omarchy's *Select all* replaces or
+drops the selection that was meant to be read. The same
+happened to `SUPER + ESCAPE` (*System menu*), `SUPER + ALT + arrows` (*Move window to group*) and
+`SUPER + ALT + Space` (*Apps*). Diagnose with `hyprland-tts keybind check "SUPER, A"` — it lists
+the other bind with its description, e.g. `64 A -> __lua 70 (Select all)`. Fixed by new
+defaults that Omarchy does not use (table above). After upgrading from 1.x run once:
+
+```bash
+hyprland-tts setup                 # regenerates tts.conf/tts.lua with the new defaults
+```
+
+Shortcuts you set yourself (`keybind set`) are kept; `setup` warns if one of them is shared.
 
 ### Engine install (`hyprland-tts engine install qwen3`)
 

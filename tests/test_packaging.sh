@@ -47,7 +47,7 @@ case_install_layout() {
   lib="$stage/usr/lib/hyprland-tts"
   assert_file "$stage/usr/bin/hyprland-tts" "dispatcher installed"
   for module in common text router model image keybind engine qwen3 qwen3_install worker voices \
-    pyenv stream player setup hover; do
+    pyenv stream player setup hover preview; do
     assert_file "$lib/$module.sh" "module $module installed"
   done
   assert_file "$lib/py/requirements.txt" "pinned helper requirements installed (deps install needs it)"
@@ -85,6 +85,25 @@ case_makefile_uninstall_is_complete() {
   PATH="${PATH#"$TEST_ROOT/fakebin:"}" make -C "$TEST_REPO_DIR" uninstall \
     DESTDIR="$TEST_ROOT/stage" PREFIX=/usr >/dev/null 2>&1
   assert_eq "" "$(find "$TEST_ROOT/stage" -type f 2>/dev/null)" "no file left after uninstall"
+}
+
+# case_local_uninstall_keeps_user_data — with PREFIX=~/.local the share dir doubles as the data dir.
+# Args:    none
+# Returns: 0 always
+# Globals: reads TEST_ROOT
+# Notes:   `rm -rf share/hyprland-tts` used to delete the Qwen3 engine and the user's own voices.
+case_local_uninstall_keeps_user_data() {
+  local prefix="$TEST_ROOT/local"
+  # Installed program files next to an engine and a cloned voice the user created.
+  PATH="${PATH#"$TEST_ROOT/fakebin:"}" make -C "$TEST_REPO_DIR" install PREFIX="$prefix" >/dev/null 2>&1
+  mkdir -p "$prefix/share/hyprland-tts/engines/qwen3" "$prefix/share/hyprland-tts/voices/mine"
+  echo model > "$prefix/share/hyprland-tts/engines/qwen3/model.gguf"
+  echo clip > "$prefix/share/hyprland-tts/voices/mine/ref.wav"
+  PATH="${PATH#"$TEST_ROOT/fakebin:"}" make -C "$TEST_REPO_DIR" uninstall PREFIX="$prefix" >/dev/null 2>&1
+  assert_file "$prefix/share/hyprland-tts/engines/qwen3/model.gguf" "engine kept"
+  assert_file "$prefix/share/hyprland-tts/voices/mine/ref.wav" "user voice kept"
+  assert_no_file "$prefix/share/hyprland-tts/shipped-voices/de-thorsten/ref.spk" "shipped voices removed"
+  assert_no_file "$prefix/bin/hyprland-tts" "program removed"
 }
 
 test_run_cases
