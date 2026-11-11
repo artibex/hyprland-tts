@@ -1,0 +1,12 @@
+{
+ "source_id": "LJ037-0131",
+ "source_text": "When he reached a gasoline service station one block away he turned north and walked toward a parking area in the rear of the station.",
+ "corpus": "LJSpeech-1.1",
+ "dur_s": 8.26,
+ "peak": 0.611,
+ "clip_frac": 0.0,
+ "snr_proxy_db": 32.8,
+ "cps": 16.2,
+ "whisper_cer": 0.0,
+ "ref_text_origin": "whisper-punctuated (identical words)"
+}

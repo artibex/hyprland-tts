@@ -1,0 +1,23 @@
+# Pinned, hash-checked helper dependencies for hyprland-tts (pip --require-hashes --no-deps).
+# fasttext-predict has no wheel for Python 3.14 yet; pip then builds the sdist (needs g++).
+# Regenerate hashes from PyPI when bumping a version; all three are installed together.
+
+fasttext-predict==0.9.2.4 \
+    --hash=sha256:19565fdf0bb9427831cfc75fca736ab9d71ba7ce02e3ea951e5839beb66560b6 \
+    --hash=sha256:229dfdf8943dd76231206c7c9179e3f99d45879e5b654626ee7b73b7fa495d53 \
+    --hash=sha256:6cbecd3908909339316f61db38030ce43890c25bddb06c955191458af13ccfc5 \
+    --hash=sha256:5af82e09227d993befc00271407b9d3c8aae81d34b35f96208223faf609f4b0c \
+    --hash=sha256:427e99ba963b2c744ed7233304037a83b7adece97de6f361cfd356aa43cb87f3 \
+    --hash=sha256:11ef7af2a4431c76d2226e47334e86b9c4a78a98f6cb68b1ce9a1fc20e04c904 \
+    --hash=sha256:05ba6a0fbf8cb2141b8ca2bc461db97af8ac31a62341e4696a75048b9de39e10 \
+    --hash=sha256:ddd2f03f3f206585543f5274b1dbc5f651bae141a1b14c9d5225c2a12e5075c2 \
+    --hash=sha256:9b8e51eef5ebb1905b3b10e0f19cec7f0259f9134cfde76e4c172ac5dff3d1f1 \
+    --hash=sha256:37717d593560d2d82911ba644dc0eb0c8d9b270b005d59bc278ae1465b77b50e \
+    --hash=sha256:18a6fb0d74c7df9280db1f96cb75d990bfd004fa9d669493ea3dd3d54f84dbc7
+
+num2words==0.5.14 \
+    --hash=sha256:1c8e5b00142fc2966fd8d685001e36c4a9911e070d1b120e1beb721fa1edb33d \
+    --hash=sha256:b066ec18e56b6616a3b38086b5747daafbaa8868b226a36127e0451c0cf379c6
+
+docopt==0.6.2 \
+    --hash=sha256:49b3a825280bd66b3aa83585ef59c4a8c82f2c8a522dbe754a8bc8d08c85c491

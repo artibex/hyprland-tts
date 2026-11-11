@@ -12,55 +12,164 @@
 # ==============================================================================
 set -euo pipefail
 
+# The checkout this script lives in (symlinks resolved) and the install prefix.
 REPO_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 PREFIX="$HOME/.local"
 
-echo "================================================="
-echo "   hyprland-tts — local installer"
-echo "================================================="
+# print_banner — print the installer's title block.
+# Args:    none
+# Returns: 0 always
+# Globals: none
+print_banner() {
+  cat <<'TEXT'
+=================================================
+   hyprland-tts — local installer
+=================================================
+TEXT
+}
 
-# --- 1. Runtime dependencies --------------------------------------------------
-echo "[1/4] Checking dependencies..."
-missing=()
-for c in wl-paste piper-tts mpv socat curl awk sed grep; do
-  command -v "$c" >/dev/null 2>&1 || missing+=("$c")
-done
-if [ "${#missing[@]}" -gt 0 ]; then
+# check_dependencies — report missing runtime tools and how to install them.
+# Args:    none
+# Returns: 0 always (missing tools only produce a hint)
+# Globals: none
+check_dependencies() {
+  local tool
+  local -a missing=()
+  # Step banner first, so a long dependency probe is never silent.
+  echo "[1/4] Checking dependencies..."
+  # flock and setsid (util-linux) run the warm engine worker; find/xargs list installed voices.
+  for tool in wl-paste piper-tts mpv socat curl awk sed grep flock setsid find xargs; do
+    command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
+  done
+  # Nothing missing means no output at all.
+  [ "${#missing[@]}" -gt 0 ] || return 0
   echo "  Missing tools: ${missing[*]}"
   echo "  Install the packages providing them, e.g.:"
-  echo "    sudo pacman -S --needed wl-clipboard mpv socat curl grep sed gawk gtk4 libadwaita python-gobject"
+  # Name the packages in one copy-pasteable line.
+  echo "    sudo pacman -S --needed wl-clipboard mpv socat curl grep sed gawk gtk4 libadwaita" \
+    "python-gobject"
   echo "    <aur-helper> -S piper-tts-bin"
-  echo "  Optional (image reading): sudo pacman -S --needed tesseract tesseract-data-eng perl-image-exiftool"
+  echo "  Optional (image reading): sudo pacman -S --needed tesseract tesseract-data-eng" \
+    "perl-image-exiftool"
+  # The tool list is only advice; the installation goes on regardless.
   echo "  (Re-run this script afterwards.)"
-  # piper-tts is the only hard blocker for actually speaking; warn but continue,
-  # so the user can still install voices and wire keybinds.
-fi
+}
 
-# --- 2. Install program files into ~/.local -----------------------------------
-echo "[2/4] Installing program files into $PREFIX ..."
-make -C "$REPO_DIR" PREFIX="$PREFIX" install >/dev/null
+# other_installs — list hyprland-tts installs that would shadow or compete with this one.
+# Args:    $1 <path of the binary this installer writes>
+# Returns: 0 always; stdout: one line per competing install (empty = none)
+# Globals: reads PATH
+other_installs() {
+  local own_binary="$1" found
+  # A pacman package also owns the menu entry and /usr/lib, whatever the PATH order is.
+  if command -v pacman >/dev/null 2>&1 && pacman -Qq hyprland-tts >/dev/null 2>&1; then
+    echo "pacman package $(pacman -Q hyprland-tts 2>/dev/null)"
+  fi
+  # Every other hyprland-tts on PATH runs instead of (or next to) ours; /bin and /usr/bin are
+  # often one directory, so paths are resolved before duplicates are dropped.
+  while IFS= read -r found; do
+    # Our own target is not a competitor.
+    [ "$found" = "$(readlink -f "$own_binary")" ] || echo "$found"
+  done < <(type -ap hyprland-tts 2>/dev/null | xargs -r -d '\n' readlink -f | awk '!seen[$0]++')
+}
 
-# --- 3. PATH sanity -----------------------------------------------------------
-if ! command -v hyprland-tts >/dev/null 2>&1; then
+# check_no_other_install — stop before installing when another install would take over.
+# Args:    none
+# Returns: 0 when this is the only install; exits 1 otherwise (nothing is installed then)
+# Globals: reads PREFIX
+# Notes:   Two installs = two versions: keybinds, menu entry and GUI ran the older one (README).
+check_no_other_install() {
+  local competitors
+  competitors="$(other_installs "$PREFIX/bin/hyprland-tts")"
+  # Only a lone install is safe to continue.
+  [ -n "$competitors" ] || return 0
+  # The competitors are listed indented under one headline.
+  echo "  Another hyprland-tts install is present:"
+  printf '%s\n' "$competitors" | sed 's/^/    /'
+  # Name both clean ways out; nothing has been written yet.
+  echo "  It would keep running instead of this checkout (keybinds, menu entry, GUI)."
+  echo "  Upgrade the package from this checkout instead:  makepkg -si"
+  echo "  or remove it first:  sudo pacman -R hyprland-tts   (then re-run this script)"
+  # Non-zero, so scripted installs notice the refusal.
+  exit 1
+}
+
+# install_files — install the program files into the prefix via the Makefile.
+# Args:    none
+# Returns: 0 on success; non-zero when make fails (set -e then ends the script)
+# Globals: reads REPO_DIR, PREFIX
+install_files() {
+  echo "[2/4] Installing program files into $PREFIX ..."
+  # The Makefile is shared with the package build, so both install the same files.
+  make -C "$REPO_DIR" PREFIX="$PREFIX" install >/dev/null
+}
+
+# check_path — tell the user when the install directory is not on PATH.
+# Args:    none
+# Returns: 0 always
+# Globals: reads PREFIX, PATH
+check_path() {
+  local resolved
+  resolved="$(command -v hyprland-tts 2>/dev/null || true)"
+  # Only our own binary counts as "on PATH"; any other one would be a second install.
+  if [ "$resolved" = "$PREFIX/bin/hyprland-tts" ]; then
+    echo "[3/4] hyprland-tts is on PATH."
+    return 0
+  fi
+  # Wrapping PATH in colons makes the entry match exact.
   case ":$PATH:" in
     *":$PREFIX/bin:"*) : ;;
     *)
       echo "[3/4] Note: $PREFIX/bin is not on your PATH."
+      # Copy-pasteable fix for the missing PATH entry.
       echo "      Add this to your shell profile:  export PATH=\"\$HOME/.local/bin:\$PATH\""
       ;;
   esac
-else
-  echo "[3/4] hyprland-tts is on PATH."
-fi
+}
 
-# --- 4. Wire Hyprland keybinds ------------------------------------------------
-echo "[4/4] Wiring Hyprland keybinds..."
-"$PREFIX/bin/hyprland-tts" setup || true
+# wire_keybinds — let the installed program wire the Hyprland keybinds.
+# Args:    none
+# Returns: 0 always (a failing setup only shows its own message)
+# Globals: reads PREFIX
+wire_keybinds() {
+  echo "[4/4] Wiring Hyprland keybinds..."
+  "$PREFIX/bin/hyprland-tts" setup || true
+}
 
-echo ""
-echo "================================================="
-echo " Installed. Next steps:"
-echo "   1) Install a voice:   hyprland-tts gui"
-echo "                    or:  hyprland-tts model install en-ryan-high"
-echo "   2) Highlight text and press SUPER + A to speak."
-echo "================================================="
+# print_next_steps — print what the user can do now.
+# Args:    none
+# Returns: 0 always
+# Globals: none
+print_next_steps() {
+  cat <<'TEXT'
+
+=================================================
+ Installed. Next steps:
+   1) Install a voice:   hyprland-tts gui
+                    or:  hyprland-tts model install en-ryan-high
+   2) Highlight text and press SUPER + ALT + A to speak.
+   3) Optional, neural voices:  hyprland-tts engine install qwen3
+      (needs cmake git gcc make; shaderc + vulkan-icd-loader for the GPU build)
+=================================================
+TEXT
+}
+
+# main — run the four installation steps in order.
+# Args:    none
+# Returns: 0 on success
+# Globals: none
+main() {
+  print_banner
+  # Missing tools are only reported: piper-tts is the sole hard blocker for speaking, and
+  # the user can still install voices and wire keybinds.
+  check_dependencies
+  # A second install would shadow this one, so stop before anything is written.
+  check_no_other_install
+  install_files
+  check_path
+  # Wiring last: it needs the installed binary.
+  wire_keybinds
+  print_next_steps
+}
+
+main "$@"

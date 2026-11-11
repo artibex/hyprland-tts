@@ -1,0 +1,137 @@
+{
+ "whole": [],
+ "mixed": [
+  {
+   "sentences": [
+    {
+     "gold": "en",
+     "text": "Our tour guide in Vienna spoke about the history of the old imperial palace."
+    },
+    {
+     "gold": "de",
+     "text": "Hier lebte einst Kaiserin Elisabeth, die allen nur als Sisi bekannt ist."
+    },
+    {
+     "gold": "en",
+     "text": "The audience listened carefully and took lots of photographs."
+    }
+   ]
+  },
+  {
+   "sentences": [
+    {
+     "gold": "de",
+     "text": "Nach langem Überlegen habe ich mich für das günstigere Modell entschieden."
+    },
+    {
+     "gold": "de",
+     "text": "Yes!"
+    },
+    {
+     "gold": "de",
+     "text": "Es hat ein größeres Display und hält mindestens zwei Tage ohne Aufladen durch."
+    }
+   ]
+  },
+  {
+   "sentences": [
+    {
+     "gold": "fr",
+     "text": "La conférence réunit chaque année des chercheurs venus du monde entier."
+    },
+    {
+     "gold": "en",
+     "text": "This year's keynote will focus on renewable energy and climate adaptation."
+    },
+    {
+     "gold": "fr",
+     "text": "Les inscriptions sont ouvertes jusqu'à la fin du mois de mars."
+    }
+   ]
+  },
+  {
+   "sentences": [
+    {
+     "gold": "es",
+     "text": "La maestra les pidió a los niños que dibujaran su animal favorito."
+    },
+    {
+     "gold": "es",
+     "text": "Perfecto."
+    },
+    {
+     "gold": "es",
+     "text": "Algunos dibujaron perros y gatos, otros prefirieron dinosaurios y dragones."
+    }
+   ]
+  },
+  {
+   "sentences": [
+    {
+     "gold": "it",
+     "text": "Il nostro albergo si trova a due passi dal centro storico di Firenze."
+    },
+    {
+     "gold": "en",
+     "text": "Breakfast is included and served every morning on the terrace."
+    },
+    {
+     "gold": "it",
+     "text": "Se desiderate, possiamo organizzare anche una visita guidata agli Uffizi."
+    }
+   ]
+  },
+  {
+   "sentences": [
+    {
+     "gold": "en",
+     "text": "The software update installs automatically when your device is connected to Wi-Fi."
+    },
+    {
+     "gold": "en",
+     "text": "Danke schön."
+    },
+    {
+     "gold": "en",
+     "text": "If you prefer to install it manually, open the settings menu."
+    }
+   ]
+  },
+  {
+   "sentences": [
+    {
+     "gold": "de",
+     "text": "Der Vortrag begann pünktlich, und der Raum war bis auf den letzten Platz gefüllt."
+    },
+    {
+     "gold": "en",
+     "text": "Ladies and gentlemen, welcome to the annual developer conference."
+    },
+    {
+     "gold": "de",
+     "text": "Anschließend stellte die Referentin ihre Ergebnisse in zwanzig Minuten vor."
+    },
+    {
+     "gold": "de",
+     "text": "Applaus."
+    }
+   ]
+  },
+  {
+   "sentences": [
+    {
+     "gold": "nl",
+     "text": "Mijn zus woont sinds vorig jaar in Utrecht en werkt bij een kleine uitgeverij."
+    },
+    {
+     "gold": "nl",
+     "text": "Fijn."
+    },
+    {
+     "gold": "nl",
+     "text": "Ze komt in december terug naar huis voor de kerstdagen."
+    }
+   ]
+  }
+ ]
+}

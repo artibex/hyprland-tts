@@ -1,0 +1,113 @@
+name: CI
+
+# Runs on every push and pull request. Three independent jobs:
+#   static   - syntax, shellcheck, the coding-standard gate (no dependencies beyond bash/python)
+#   tests    - the bash suites (fake engine, fake tools, real mpv with a null audio output) and
+#              pytest with the pinned, hash-checked helper dependencies
+#   package  - a real makepkg build inside an Arch Linux container (the package target)
+# ubuntu-latest hosts the first two because the tests need no Arch tooling (they use fakes and
+# a scratch HOME); the Arch container is only used where pacman/makepkg are the point.
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Checksum of the fastText language model, identical to LID_MODEL_SHA256 in lib/pyenv.sh.
+  LID_MODEL_SHA256: 8f3472cfe8738a7b6099e8e999c3cbfae0dcd15696aac7d7738a8039db603e83
+  LID_MODEL_URL: https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.ftz
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Syntax (bash -n, py_compile)
+        run: make check
+      - name: Shellcheck
+        run: shellcheck -x bin/hyprland-tts lib/*.sh install-tts.sh uninstall-tts.sh tests/*.sh tests/lib/*.sh
+      - name: Coding-standard gate (R1-R7 + comment runs)
+        run: make qa
+
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install system packages
+        run: sudo apt-get update && sudo apt-get install -y mpv socat util-linux procps curl gawk
+      - name: Python helper dependencies (pinned, hash-checked)
+        run: |
+          python -m venv "$HOME/helper-venv"
+          "$HOME/helper-venv/bin/pip" install --require-hashes --no-deps -r lib/py/requirements.txt
+          "$HOME/helper-venv/bin/pip" install pytest
+      - name: Restore fastText model
+        id: model-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/lid.176.ftz
+          key: lid-model-${{ env.LID_MODEL_SHA256 }}
+      - name: Download fastText model (sha256 verified)
+        if: steps.model-cache.outputs.cache-hit != 'true'
+        run: |
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$HOME/lid.176.ftz" "$LID_MODEL_URL"
+          echo "$LID_MODEL_SHA256  $HOME/lid.176.ftz" | sha256sum -c -
+      - name: Bash suites and pytest
+        env:
+          REQUIRE_PYTEST: "1"
+        run: |
+          export HTTS_PYTHON="$HOME/helper-venv/bin/python3" HTTS_LID_MODEL="$HOME/lid.176.ftz"
+          export PATH="$HOME/helper-venv/bin:$PATH"
+          bash tests/run.sh
+
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Install build tools
+        run: pacman -Syu --noconfirm --needed base-devel git sudo
+      - uses: actions/checkout@v4
+      - name: Build the package and compare .SRCINFO (as a normal user)
+        run: |
+          useradd -m builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          su builder -c "cd '$GITHUB_WORKSPACE' && makepkg --printsrcinfo | diff - .SRCINFO"
+          su builder -c "cd '$GITHUB_WORKSPACE' && makepkg -f --nodeps --noconfirm"
+      - name: Installed copy reports its dependency status
+        run: |
+          make install DESTDIR=/tmp/stage PREFIX=/usr
+          HYPRLAND_TTS_ALLOW_ROOT=1 HOME=/tmp/home /tmp/stage/usr/bin/hyprland-tts deps status --porcelain
+          test -f /tmp/stage/usr/lib/hyprland-tts/py/requirements.txt
+
+  gui:
+    # GTK4/libadwaita headless suite on Broadway; Arch matches the target desktop stack.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Install GTK stack and pytest
+        run: pacman -Syu --noconfirm --needed gtk4 libadwaita python-gobject python-pytest ttf-dejavu
+      - uses: actions/checkout@v4
+      - name: GUI suite (as a normal user; the GUI refuses to run as root)
+        run: |
+          useradd -m tester
+          chown -R tester:tester "$GITHUB_WORKSPACE"
+          su tester -c "cd '$GITHUB_WORKSPACE' && python -m pytest -q -p no:cacheprovider tests/gui"

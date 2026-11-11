@@ -1,0 +1,12 @@
+{
+ "source_id": "siwis_neut_book_s03_0140",
+ "source_text": "De là un équilibre parfait entre la poussée intérieure et la poussée extérieure, qui se neutralisent, ce qui vous permet de les supporter sans peine.",
+ "corpus": "SIWIS",
+ "dur_s": 8.62,
+ "peak": 0.519,
+ "clip_frac": 0.0,
+ "snr_proxy_db": 38.8,
+ "cps": 17.3,
+ "whisper_cer": 0.0137,
+ "ref_text_origin": "corpus prompt"
+}

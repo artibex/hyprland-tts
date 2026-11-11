@@ -1,0 +1,1554 @@
+{
+ "whole": [
+  {
+   "category": "sentence",
+   "gold": "de",
+   "text": "Das Wetter ist heute sehr schön, deshalb gehen wir im Park spazieren."
+  },
+  {
+   "category": "sentence",
+   "gold": "de",
+   "text": "Die Bundesregierung hat gestern ein neues Gesetz zur Digitalisierung beschlossen."
+  },
+  {
+   "category": "sentence",
+   "gold": "de",
+   "text": "Ich habe mir gestern ein Buch über die Geschichte der Seefahrt gekauft."
+  },
+  {
+   "category": "sentence",
+   "gold": "de",
+   "text": "Können Sie mir bitte sagen, wie ich zum Hauptbahnhof komme?"
+  },
+  {
+   "category": "sentence",
+   "gold": "de",
+   "text": "Der Zug nach München fährt heute leider mit zwanzig Minuten Verspätung."
+  },
+  {
+   "category": "sentence",
+   "gold": "de",
+   "text": "Wir sollten das Problem gemeinsam lösen, bevor es noch größer wird."
+  },
+  {
+   "category": "sentence",
+   "gold": "de",
+   "text": "Nach dem Essen trinken meine Eltern gern eine Tasse Kaffee auf dem Balkon."
+  },
+  {
+   "category": "sentence",
+   "gold": "de",
+   "text": "Die Ergebnisse der Studie wurden in einer Fachzeitschrift veröffentlicht."
+  },
+  {
+   "category": "sentence",
+   "gold": "de",
+   "text": "Es regnet seit drei Tagen, und der Fluss steigt immer weiter an."
+  },
+  {
+   "category": "sentence",
+   "gold": "de",
+   "text": "Mein Bruder arbeitet als Ingenieur bei einem großen Automobilhersteller."
+  },
+  {
+   "category": "sentence",
+   "gold": "de",
+   "text": "Bitte lesen Sie die Anleitung sorgfältig durch, bevor Sie das Gerät benutzen."
+  },
+  {
+   "category": "sentence",
+   "gold": "de",
+   "text": "Er sagte, dass er morgen nicht kommen könne, weil er krank sei."
+  },
+  {
+   "category": "sentence",
+   "gold": "de",
+   "text": "Im Sommer fahren wir nach Italien, um am Meer zu entspannen."
+  },
+  {
+   "category": "sentence",
+   "gold": "de",
+   "text": "Das Museum ist dienstags bis sonntags von zehn bis achtzehn Uhr geöffnet."
+  },
+  {
+   "category": "sentence",
+   "gold": "en",
+   "text": "The weather is lovely today, so we decided to go for a walk in the park."
+  },
+  {
+   "category": "sentence",
+   "gold": "en",
+   "text": "The government passed a new law on digital privacy earlier this week."
+  },
+  {
+   "category": "sentence",
+   "gold": "en",
+   "text": "I bought a book about the history of seafaring yesterday afternoon."
+  },
+  {
+   "category": "sentence",
+   "gold": "en",
+   "text": "Could you please tell me how to get to the central station from here?"
+  },
+  {
+   "category": "sentence",
+   "gold": "en",
+   "text": "The train to Manchester is running twenty minutes late this morning."
+  },
+  {
+   "category": "sentence",
+   "gold": "en",
+   "text": "We should solve this problem together before it gets any bigger."
+  },
+  {
+   "category": "sentence",
+   "gold": "en",
+   "text": "After dinner my parents like to drink a cup of coffee on the balcony."
+  },
+  {
+   "category": "sentence",
+   "gold": "en",
+   "text": "The results of the study were published in a peer reviewed journal."
+  },
+  {
+   "category": "sentence",
+   "gold": "en",
+   "text": "It has been raining for three days and the river keeps rising."
+  },
+  {
+   "category": "sentence",
+   "gold": "en",
+   "text": "My brother works as an engineer for a large car manufacturer."
+  },
+  {
+   "category": "sentence",
+   "gold": "en",
+   "text": "Please read the instructions carefully before using the device."
+  },
+  {
+   "category": "sentence",
+   "gold": "en",
+   "text": "He said that he would not be able to come tomorrow because he was ill."
+  },
+  {
+   "category": "sentence",
+   "gold": "en",
+   "text": "In the summer we are going to Italy to relax by the sea."
+  },
+  {
+   "category": "sentence",
+   "gold": "en",
+   "text": "The museum is open from ten in the morning until six in the evening."
+  },
+  {
+   "category": "sentence",
+   "gold": "fr",
+   "text": "Il fait très beau aujourd'hui, alors nous allons nous promener dans le parc."
+  },
+  {
+   "category": "sentence",
+   "gold": "fr",
+   "text": "Le gouvernement a adopté hier une nouvelle loi sur la protection des données."
+  },
+  {
+   "category": "sentence",
+   "gold": "fr",
+   "text": "J'ai acheté hier un livre sur l'histoire de la navigation maritime."
+  },
+  {
+   "category": "sentence",
+   "gold": "fr",
+   "text": "Pouvez-vous me dire comment aller à la gare centrale, s'il vous plaît ?"
+  },
+  {
+   "category": "sentence",
+   "gold": "fr",
+   "text": "Le train pour Lyon a vingt minutes de retard ce matin."
+  },
+  {
+   "category": "sentence",
+   "gold": "fr",
+   "text": "Nous devrions résoudre ce problème ensemble avant qu'il ne s'aggrave."
+  },
+  {
+   "category": "sentence",
+   "gold": "fr",
+   "text": "Après le dîner, mes parents aiment boire un café sur le balcon."
+  },
+  {
+   "category": "sentence",
+   "gold": "fr",
+   "text": "Les résultats de l'étude ont été publiés dans une revue scientifique."
+  },
+  {
+   "category": "sentence",
+   "gold": "fr",
+   "text": "Il pleut depuis trois jours et la rivière continue de monter."
+  },
+  {
+   "category": "sentence",
+   "gold": "fr",
+   "text": "Mon frère travaille comme ingénieur dans un grand constructeur automobile."
+  },
+  {
+   "category": "sentence",
+   "gold": "fr",
+   "text": "Veuillez lire attentivement le mode d'emploi avant d'utiliser l'appareil."
+  },
+  {
+   "category": "sentence",
+   "gold": "fr",
+   "text": "En été, nous partons en Italie pour nous reposer au bord de la mer."
+  },
+  {
+   "category": "sentence",
+   "gold": "es",
+   "text": "Hoy hace muy buen tiempo, así que vamos a pasear por el parque."
+  },
+  {
+   "category": "sentence",
+   "gold": "es",
+   "text": "El gobierno aprobó ayer una nueva ley sobre la protección de datos personales."
+  },
+  {
+   "category": "sentence",
+   "gold": "es",
+   "text": "Ayer compré un libro sobre la historia de la navegación."
+  },
+  {
+   "category": "sentence",
+   "gold": "es",
+   "text": "¿Puede decirme cómo llegar a la estación central, por favor?"
+  },
+  {
+   "category": "sentence",
+   "gold": "es",
+   "text": "El tren a Sevilla llega con veinte minutos de retraso esta mañana."
+  },
+  {
+   "category": "sentence",
+   "gold": "es",
+   "text": "Deberíamos resolver este problema juntos antes de que empeore."
+  },
+  {
+   "category": "sentence",
+   "gold": "es",
+   "text": "Después de cenar, a mis padres les gusta tomar un café en el balcón."
+  },
+  {
+   "category": "sentence",
+   "gold": "es",
+   "text": "Los resultados del estudio se publicaron en una revista científica."
+  },
+  {
+   "category": "sentence",
+   "gold": "es",
+   "text": "Llueve desde hace tres días y el río sigue subiendo."
+  },
+  {
+   "category": "sentence",
+   "gold": "es",
+   "text": "Mi hermano trabaja como ingeniero en un gran fabricante de automóviles."
+  },
+  {
+   "category": "sentence",
+   "gold": "es",
+   "text": "Lea las instrucciones con atención antes de usar el aparato."
+  },
+  {
+   "category": "sentence",
+   "gold": "es",
+   "text": "En verano iremos a Italia para descansar junto al mar."
+  },
+  {
+   "category": "sentence",
+   "gold": "it",
+   "text": "Oggi il tempo è bellissimo, quindi andiamo a fare una passeggiata nel parco."
+  },
+  {
+   "category": "sentence",
+   "gold": "it",
+   "text": "Il governo ha approvato ieri una nuova legge sulla protezione dei dati."
+  },
+  {
+   "category": "sentence",
+   "gold": "it",
+   "text": "Ieri ho comprato un libro sulla storia della navigazione."
+  },
+  {
+   "category": "sentence",
+   "gold": "it",
+   "text": "Può dirmi come arrivare alla stazione centrale, per favore?"
+  },
+  {
+   "category": "sentence",
+   "gold": "it",
+   "text": "Il treno per Milano è in ritardo di venti minuti questa mattina."
+  },
+  {
+   "category": "sentence",
+   "gold": "it",
+   "text": "Dovremmo risolvere questo problema insieme prima che peggiori."
+  },
+  {
+   "category": "sentence",
+   "gold": "it",
+   "text": "Dopo cena i miei genitori amano bere un caffè sul balcone."
+  },
+  {
+   "category": "sentence",
+   "gold": "it",
+   "text": "I risultati dello studio sono stati pubblicati su una rivista scientifica."
+  },
+  {
+   "category": "sentence",
+   "gold": "it",
+   "text": "Piove da tre giorni e il fiume continua a salire."
+  },
+  {
+   "category": "sentence",
+   "gold": "it",
+   "text": "Mio fratello lavora come ingegnere presso una grande casa automobilistica."
+  },
+  {
+   "category": "sentence",
+   "gold": "it",
+   "text": "Leggere attentamente le istruzioni prima di utilizzare l'apparecchio."
+  },
+  {
+   "category": "sentence",
+   "gold": "it",
+   "text": "In estate andremo in Spagna per rilassarci al mare."
+  },
+  {
+   "category": "sentence",
+   "gold": "pt",
+   "text": "Hoje o tempo está muito bonito, por isso vamos passear no parque."
+  },
+  {
+   "category": "sentence",
+   "gold": "pt",
+   "text": "O governo aprovou ontem uma nova lei sobre a proteção de dados pessoais."
+  },
+  {
+   "category": "sentence",
+   "gold": "pt",
+   "text": "Ontem comprei um livro sobre a história da navegação marítima."
+  },
+  {
+   "category": "sentence",
+   "gold": "pt",
+   "text": "Pode dizer-me como chegar à estação central, por favor?"
+  },
+  {
+   "category": "sentence",
+   "gold": "pt",
+   "text": "Os resultados do estudo foram publicados numa revista científica."
+  },
+  {
+   "category": "sentence",
+   "gold": "pt",
+   "text": "No verão vamos para a Itália descansar à beira-mar."
+  },
+  {
+   "category": "sentence",
+   "gold": "nl",
+   "text": "Het weer is vandaag erg mooi, dus we gaan wandelen in het park."
+  },
+  {
+   "category": "sentence",
+   "gold": "nl",
+   "text": "De regering heeft gisteren een nieuwe wet over gegevensbescherming aangenomen."
+  },
+  {
+   "category": "sentence",
+   "gold": "nl",
+   "text": "Gisteren heb ik een boek over de geschiedenis van de zeevaart gekocht."
+  },
+  {
+   "category": "sentence",
+   "gold": "nl",
+   "text": "Kunt u mij vertellen hoe ik bij het centraal station kom?"
+  },
+  {
+   "category": "sentence",
+   "gold": "nl",
+   "text": "De resultaten van het onderzoek zijn gepubliceerd in een wetenschappelijk tijdschrift."
+  },
+  {
+   "category": "sentence",
+   "gold": "nl",
+   "text": "In de zomer gaan we naar Italië om te ontspannen aan zee."
+  },
+  {
+   "category": "short",
+   "gold": "de",
+   "text": "Guten Morgen zusammen"
+  },
+  {
+   "category": "short",
+   "gold": "de",
+   "text": "Wie geht es dir?"
+  },
+  {
+   "category": "short",
+   "gold": "de",
+   "text": "Das ist nicht möglich."
+  },
+  {
+   "category": "short",
+   "gold": "de",
+   "text": "Vielen Dank für Ihre Hilfe"
+  },
+  {
+   "category": "short",
+   "gold": "de",
+   "text": "Ich weiß es nicht"
+  },
+  {
+   "category": "short",
+   "gold": "de",
+   "text": "Zum Warenkorb hinzufügen"
+  },
+  {
+   "category": "short",
+   "gold": "de",
+   "text": "Bis später, tschüss!"
+  },
+  {
+   "category": "short",
+   "gold": "de",
+   "text": "Eine kleine Pause"
+  },
+  {
+   "category": "short",
+   "gold": "en",
+   "text": "Good morning everyone"
+  },
+  {
+   "category": "short",
+   "gold": "en",
+   "text": "How are you doing?"
+  },
+  {
+   "category": "short",
+   "gold": "en",
+   "text": "That is not possible."
+  },
+  {
+   "category": "short",
+   "gold": "en",
+   "text": "Thank you for your help"
+  },
+  {
+   "category": "short",
+   "gold": "en",
+   "text": "I do not know"
+  },
+  {
+   "category": "short",
+   "gold": "en",
+   "text": "Add to shopping cart"
+  },
+  {
+   "category": "short",
+   "gold": "en",
+   "text": "See you later, bye!"
+  },
+  {
+   "category": "short",
+   "gold": "en",
+   "text": "A short break"
+  },
+  {
+   "category": "short",
+   "gold": "fr",
+   "text": "Bonjour tout le monde"
+  },
+  {
+   "category": "short",
+   "gold": "fr",
+   "text": "Comment allez-vous ?"
+  },
+  {
+   "category": "short",
+   "gold": "fr",
+   "text": "Ce n'est pas possible."
+  },
+  {
+   "category": "short",
+   "gold": "fr",
+   "text": "Merci beaucoup pour votre aide"
+  },
+  {
+   "category": "short",
+   "gold": "fr",
+   "text": "Ajouter au panier"
+  },
+  {
+   "category": "short",
+   "gold": "fr",
+   "text": "À tout à l'heure"
+  },
+  {
+   "category": "short",
+   "gold": "es",
+   "text": "Buenos días a todos"
+  },
+  {
+   "category": "short",
+   "gold": "es",
+   "text": "¿Cómo estás?"
+  },
+  {
+   "category": "short",
+   "gold": "es",
+   "text": "Eso no es posible."
+  },
+  {
+   "category": "short",
+   "gold": "es",
+   "text": "Muchas gracias por su ayuda"
+  },
+  {
+   "category": "short",
+   "gold": "es",
+   "text": "Añadir a la cesta"
+  },
+  {
+   "category": "short",
+   "gold": "es",
+   "text": "Hasta luego, adiós"
+  },
+  {
+   "category": "short",
+   "gold": "it",
+   "text": "Buongiorno a tutti"
+  },
+  {
+   "category": "short",
+   "gold": "it",
+   "text": "Come stai?"
+  },
+  {
+   "category": "short",
+   "gold": "it",
+   "text": "Non è possibile."
+  },
+  {
+   "category": "short",
+   "gold": "it",
+   "text": "Grazie mille per l'aiuto"
+  },
+  {
+   "category": "short",
+   "gold": "it",
+   "text": "Aggiungi al carrello"
+  },
+  {
+   "category": "short",
+   "gold": "it",
+   "text": "A più tardi, ciao"
+  },
+  {
+   "category": "short",
+   "gold": "pt",
+   "text": "Bom dia a todos"
+  },
+  {
+   "category": "short",
+   "gold": "pt",
+   "text": "Muito obrigado pela ajuda"
+  },
+  {
+   "category": "short",
+   "gold": "pt",
+   "text": "Adicionar ao carrinho"
+  },
+  {
+   "category": "short",
+   "gold": "nl",
+   "text": "Goedemorgen allemaal"
+  },
+  {
+   "category": "short",
+   "gold": "nl",
+   "text": "Hartelijk dank voor de hulp"
+  },
+  {
+   "category": "short",
+   "gold": "nl",
+   "text": "Toevoegen aan winkelwagen"
+  },
+  {
+   "category": "tech_de",
+   "gold": "de",
+   "text": "Bitte öffne den Pull Request im Main Branch und prüfe den Merge Conflict."
+  },
+  {
+   "category": "tech_de",
+   "gold": "de",
+   "text": "Der Build ist fehlgeschlagen, weil das Docker Image keinen Zugriff auf den Cache hat."
+  },
+  {
+   "category": "tech_de",
+   "gold": "de",
+   "text": "Wir deployen das neue Feature morgen früh auf den Staging Server."
+  },
+  {
+   "category": "tech_de",
+   "gold": "de",
+   "text": "Im Backend läuft ein Cronjob, der jede Nacht ein Backup der Datenbank erstellt."
+  },
+  {
+   "category": "tech_de",
+   "gold": "de",
+   "text": "Starte bitte das Meeting im Zoom Call und teile deinen Screen mit dem Team."
+  },
+  {
+   "category": "tech_de",
+   "gold": "de",
+   "text": "Das Update für den Router enthält einen wichtigen Security Patch."
+  },
+  {
+   "category": "tech_de",
+   "gold": "de",
+   "text": "Ich habe den Code gestern gepusht und die Pipeline läuft jetzt durch."
+  },
+  {
+   "category": "tech_de",
+   "gold": "de",
+   "text": "Klicke auf den Button Settings und aktiviere den Dark Mode."
+  },
+  {
+   "category": "tech_de",
+   "gold": "de",
+   "text": "Der Workflow startet automatisch, sobald ein neuer Commit im Repository landet."
+  },
+  {
+   "category": "tech_de",
+   "gold": "de",
+   "text": "Das Team arbeitet im Sprint an den Tickets aus dem Backlog."
+  },
+  {
+   "category": "en_german_name",
+   "gold": "en",
+   "text": "Angela Merkel met Olaf Scholz in Berlin to discuss the new highway tolls."
+  },
+  {
+   "category": "en_german_name",
+   "gold": "en",
+   "text": "We stopped at the Hauptbahnhof and then walked to the old town for dinner."
+  },
+  {
+   "category": "en_german_name",
+   "gold": "en",
+   "text": "My colleague Jürgen Müller will present the quarterly report on Thursday."
+  },
+  {
+   "category": "en_german_name",
+   "gold": "en",
+   "text": "The word Schadenfreude has no direct translation in the English language."
+  },
+  {
+   "category": "en_german_name",
+   "gold": "en",
+   "text": "Volkswagen announced that its new factory near Wolfsburg will open next year."
+  },
+  {
+   "category": "en_german_name",
+   "gold": "en",
+   "text": "She ordered a Bratwurst with sauerkraut and a large glass of Riesling."
+  },
+  {
+   "category": "en_german_name",
+   "gold": "en",
+   "text": "The conference was held in Düsseldorf and attended by more than two thousand people."
+  },
+  {
+   "category": "en_german_name",
+   "gold": "en",
+   "text": "Please send the invoice to Herr Schmidt before the end of the week."
+  },
+  {
+   "category": "code",
+   "gold": "en",
+   "text": "Run `git commit -m 'fix typo'` and then push the branch to origin."
+  },
+  {
+   "category": "code",
+   "gold": "en",
+   "text": "Set the variable `MAX_RETRIES` to 5 in config.yaml and restart the service."
+  },
+  {
+   "category": "code",
+   "gold": "en",
+   "text": "The function returns None when the list is empty, otherwise the first element."
+  },
+  {
+   "category": "code",
+   "gold": "de",
+   "text": "Führe `npm install` aus und starte danach den Entwicklungsserver neu."
+  },
+  {
+   "category": "code",
+   "gold": "de",
+   "text": "Die Funktion gibt None zurück, wenn die Liste leer ist, sonst das erste Element."
+  },
+  {
+   "category": "code",
+   "gold": "de",
+   "text": "Setze die Variable `MAX_RETRIES` in der Datei config.yaml auf fünf."
+  },
+  {
+   "category": "code",
+   "gold": "fr",
+   "text": "Exécutez `make install` puis redémarrez le service avec systemctl."
+  },
+  {
+   "category": "code",
+   "gold": "es",
+   "text": "Ejecuta `pip install requests` y luego reinicia el servidor de desarrollo."
+  },
+  {
+   "category": "code",
+   "gold": "it",
+   "text": "Esegui `docker compose up` e poi apri il browser su localhost."
+  },
+  {
+   "category": "markdown",
+   "gold": "de",
+   "text": "## Installation\n\n- Lade das **Archiv** herunter\n- Entpacke die Datei im Ordner `~/bin`"
+  },
+  {
+   "category": "markdown",
+   "gold": "de",
+   "text": "# Hinweise\n\nSiehe [die Dokumentation](https://example.com/docs) für weitere Details."
+  },
+  {
+   "category": "markdown",
+   "gold": "en",
+   "text": "## Installation\n\n- Download the **archive**\n- Unpack the file into the `~/bin` folder"
+  },
+  {
+   "category": "markdown",
+   "gold": "en",
+   "text": "# Notes\n\nSee [the documentation](https://example.com/docs) for further details."
+  },
+  {
+   "category": "markdown",
+   "gold": "fr",
+   "text": "## Installation\n\n- Téléchargez l'**archive**\n- Décompressez le fichier dans `~/bin`"
+  },
+  {
+   "category": "markdown",
+   "gold": "es",
+   "text": "## Instalación\n\n- Descarga el **archivo**\n- Descomprímelo en la carpeta `~/bin`"
+  },
+  {
+   "category": "markdown",
+   "gold": "it",
+   "text": "## Installazione\n\n- Scarica l'**archivio**\n- Estrai il file nella cartella `~/bin`"
+  },
+  {
+   "category": "markdown",
+   "gold": "en",
+   "text": "> **Note:** this *experimental* feature is disabled by default.\n\n1. Open settings"
+  },
+  {
+   "category": "numbers",
+   "gold": "de",
+   "text": "Der Umsatz stieg im dritten Quartal um 12,5 Prozent auf 3.450.000 Euro."
+  },
+  {
+   "category": "numbers",
+   "gold": "de",
+   "text": "Termin am 14.03.2027 um 09:30 Uhr, Raum 2.14, Telefon 0711 123456."
+  },
+  {
+   "category": "numbers",
+   "gold": "en",
+   "text": "Revenue rose 12.5 percent in the third quarter to $3,450,000."
+  },
+  {
+   "category": "numbers",
+   "gold": "en",
+   "text": "Appointment on 03/14/2027 at 9:30 AM, room 2.14, call 555 0123."
+  },
+  {
+   "category": "numbers",
+   "gold": "fr",
+   "text": "Le chiffre d'affaires a augmenté de 12,5 % au troisième trimestre, à 3 450 000 euros."
+  },
+  {
+   "category": "numbers",
+   "gold": "es",
+   "text": "Las ventas subieron un 12,5 % en el tercer trimestre hasta 3.450.000 euros."
+  },
+  {
+   "category": "numbers",
+   "gold": "it",
+   "text": "Il fatturato è aumentato del 12,5 % nel terzo trimestre a 3.450.000 euro."
+  },
+  {
+   "category": "numbers",
+   "gold": "en",
+   "text": "Flight LH 1234 departs at 18:45 from gate B22 and arrives at 20:10."
+  },
+  {
+   "category": "hard",
+   "gold": "de",
+   "text": "Danke"
+  },
+  {
+   "category": "hard",
+   "gold": "de",
+   "text": "Entschuldigung"
+  },
+  {
+   "category": "hard",
+   "gold": "en",
+   "text": "Thanks"
+  },
+  {
+   "category": "hard",
+   "gold": "fr",
+   "text": "Merci"
+  },
+  {
+   "category": "hard",
+   "gold": "es",
+   "text": "Gracias"
+  },
+  {
+   "category": "hard",
+   "gold": "it",
+   "text": "Grazie"
+  },
+  {
+   "category": "hard",
+   "gold": "pt",
+   "text": "Obrigado"
+  },
+  {
+   "category": "hard",
+   "gold": "nl",
+   "text": "Alstublieft"
+  },
+  {
+   "category": "hard",
+   "gold": "de",
+   "text": "Das Meeting findet um zehn Uhr im Conference Room statt."
+  },
+  {
+   "category": "hard",
+   "gold": "de",
+   "text": "Ich muss den Code noch reviewen und dann mergen."
+  },
+  {
+   "category": "hard",
+   "gold": "de",
+   "text": "Der Server ist down, wir müssen ein Rollback machen."
+  },
+  {
+   "category": "hard",
+   "gold": "de",
+   "text": "Hast du den Link zum Repo?"
+  },
+  {
+   "category": "hard",
+   "gold": "de",
+   "text": "Alles klar, danke dir!"
+  },
+  {
+   "category": "hard",
+   "gold": "de",
+   "text": "Das Update ist da."
+  },
+  {
+   "category": "hard",
+   "gold": "de",
+   "text": "Die DSGVO und der EU AI Act gelten ab sofort für alle KI Systeme."
+  },
+  {
+   "category": "hard",
+   "gold": "de",
+   "text": "Am 3. Mai 2026 um 14 Uhr im Büro."
+  },
+  {
+   "category": "hard",
+   "gold": "en",
+   "text": "The Kindergarten teacher said the children were very well behaved."
+  },
+  {
+   "category": "hard",
+   "gold": "en",
+   "text": "I love the Oktoberfest and the Bratwurst they serve there."
+  },
+  {
+   "category": "hard",
+   "gold": "en",
+   "text": "Das Boot is a classic movie about a German submarine crew."
+  },
+  {
+   "category": "hard",
+   "gold": "en",
+   "text": "He wore Lederhosen and she wore a Dirndl at the festival."
+  },
+  {
+   "category": "hard",
+   "gold": "en",
+   "text": "Mr. Müller, our Zeitgeist expert, will speak after lunch."
+  },
+  {
+   "category": "hard",
+   "gold": "en",
+   "text": "We had Kaffee und Kuchen at her Oma's house on Sunday."
+  },
+  {
+   "category": "hard",
+   "gold": "en",
+   "text": "The café on the corner serves excellent croissants and espresso."
+  },
+  {
+   "category": "hard",
+   "gold": "en",
+   "text": "The GDPR and the EU AI Act apply to all AI systems starting now."
+  },
+  {
+   "category": "hard",
+   "gold": "it",
+   "text": "La ragazza mangia la pizza con le amiche."
+  },
+  {
+   "category": "hard",
+   "gold": "es",
+   "text": "La chica come la pizza con las amigas."
+  },
+  {
+   "category": "hard",
+   "gold": "it",
+   "text": "Lei è una brava persona e lavora molto."
+  },
+  {
+   "category": "hard",
+   "gold": "es",
+   "text": "Ella es una buena persona y trabaja mucho."
+  },
+  {
+   "category": "hard",
+   "gold": "pt",
+   "text": "Ela é uma boa pessoa e trabalha muito."
+  },
+  {
+   "category": "hard",
+   "gold": "nl",
+   "text": "Ik heb een hond en twee katten."
+  },
+  {
+   "category": "hard",
+   "gold": "de",
+   "text": "Ich habe einen Hund und zwei Katzen."
+  },
+  {
+   "category": "hard",
+   "gold": "nl",
+   "text": "Wat is jouw naam en waar kom je vandaan?"
+  },
+  {
+   "category": "hard",
+   "gold": "de",
+   "text": "Max Mustermann, Hauptstraße 12, 70173 Stuttgart"
+  },
+  {
+   "category": "hard",
+   "gold": "en",
+   "text": "John Smith, 12 Main Street, Springfield, IL 62704"
+  },
+  {
+   "category": "hard",
+   "gold": "de",
+   "text": "ACHTUNG: BITTE NICHT STÖREN"
+  },
+  {
+   "category": "hard",
+   "gold": "en",
+   "text": "WARNING: DO NOT DISTURB"
+  },
+  {
+   "category": "hard",
+   "gold": "de",
+   "text": "ich glaube wir sollten das morgen besprechen"
+  },
+  {
+   "category": "hard",
+   "gold": "en",
+   "text": "i think we should talk about it tomorrow"
+  },
+  {
+   "category": "hard",
+   "gold": "fr",
+   "text": "je pense que nous devrions en parler demain"
+  },
+  {
+   "category": "hard",
+   "gold": "es",
+   "text": "creo que deberíamos hablar de esto mañana"
+  },
+  {
+   "category": "hard",
+   "gold": "it",
+   "text": "penso che dovremmo parlarne domani"
+  }
+ ],
+ "mixed": [
+  {
+   "sentences": [
+    {
+     "gold": "de",
+     "text": "Der Autor beginnt seinen Essay mit einem bekannten Zitat."
+    },
+    {
+     "gold": "en",
+     "text": "It was the best of times, it was the worst of times."
+    },
+    {
+     "gold": "de",
+     "text": "Damit will er zeigen, dass jede Epoche ihre eigenen Widersprüche hat."
+    }
+   ]
+  },
+  {
+   "sentences": [
+    {
+     "gold": "en",
+     "text": "My grandmother always used to say the same thing when I was upset."
+    },
+    {
+     "gold": "de",
+     "text": "Aller Anfang ist schwer, aber es wird jeden Tag leichter."
+    },
+    {
+     "gold": "en",
+     "text": "I never understood it as a child, but now it makes perfect sense."
+    }
+   ]
+  },
+  {
+   "sentences": [
+    {
+     "gold": "en",
+     "text": "In French, you form the past tense with the auxiliary verb avoir."
+    },
+    {
+     "gold": "fr",
+     "text": "Hier, j'ai mangé une pomme et j'ai bu un café au lait."
+    },
+    {
+     "gold": "en",
+     "text": "Notice that the participle does not change in this case."
+    }
+   ]
+  },
+  {
+   "sentences": [
+    {
+     "gold": "en",
+     "text": "Here are two useful phrases for your trip to Madrid."
+    },
+    {
+     "gold": "es",
+     "text": "¿Dónde está el baño más cercano, por favor?"
+    },
+    {
+     "gold": "es",
+     "text": "Me gustaría reservar una mesa para dos personas esta noche."
+    },
+    {
+     "gold": "en",
+     "text": "Practice them out loud until they feel natural."
+    }
+   ]
+  },
+  {
+   "sentences": [
+    {
+     "gold": "de",
+     "text": "Hallo Frau Becker, vielen Dank für Ihre schnelle Rückmeldung."
+    },
+    {
+     "gold": "de",
+     "text": "Ich schicke Ihnen die Unterlagen morgen Vormittag per Post."
+    },
+    {
+     "gold": "en",
+     "text": "Please let me know if you have any further questions."
+    },
+    {
+     "gold": "de",
+     "text": "Mit freundlichen Grüßen aus Hamburg."
+    }
+   ]
+  },
+  {
+   "sentences": [
+    {
+     "gold": "de",
+     "text": "Gestern waren wir mit der ganzen Familie in Paris unterwegs."
+    },
+    {
+     "gold": "fr",
+     "text": "Nous avons visité le Louvre et mangé des croissants délicieux."
+    },
+    {
+     "gold": "es",
+     "text": "Después fuimos a Barcelona para ver la Sagrada Familia."
+    },
+    {
+     "gold": "de",
+     "text": "Es war eine wunderbare Reise, die wir bestimmt wiederholen werden."
+    }
+   ]
+  },
+  {
+   "sentences": [
+    {
+     "gold": "en",
+     "text": "The new release improves startup time and fixes several audio glitches."
+    },
+    {
+     "gold": "it",
+     "text": "Grazie a tutti i volontari che hanno aiutato con le traduzioni italiane."
+    },
+    {
+     "gold": "en",
+     "text": "The full changelog is available on the project website."
+    }
+   ]
+  },
+  {
+   "sentences": [
+    {
+     "gold": "en",
+     "text": "She danced all night under the silver moonlight by the sea."
+    },
+    {
+     "gold": "es",
+     "text": "Bailando, bailando, bajo la luna de la noche."
+    },
+    {
+     "gold": "en",
+     "text": "And when the morning came, she was gone without a word."
+    }
+   ]
+  },
+  {
+   "sentences": [
+    {
+     "gold": "de",
+     "text": "Zuerst erstellst du eine neue Datei und speicherst sie im Projektordner."
+    },
+    {
+     "gold": "en",
+     "text": "This function validates the user input and returns an error message."
+    },
+    {
+     "gold": "de",
+     "text": "Danach rufst du die Funktion im Hauptprogramm auf und testest das Ergebnis."
+    }
+   ]
+  },
+  {
+   "sentences": [
+    {
+     "gold": "en",
+     "text": "The minister told reporters that talks would continue next week."
+    },
+    {
+     "gold": "fr",
+     "text": "Nous ne cédons pas, nous voulons un accord juste pour tous."
+    },
+    {
+     "gold": "en",
+     "text": "Markets reacted calmly to the announcement on Monday."
+    }
+   ]
+  },
+  {
+   "sentences": [
+    {
+     "gold": "it",
+     "text": "Benvenuti al museo, la visita guidata inizia tra pochi minuti."
+    },
+    {
+     "gold": "en",
+     "text": "Welcome to the museum, the guided tour starts in a few minutes."
+    },
+    {
+     "gold": "it",
+     "text": "Vi preghiamo di spegnere i telefoni cellulari durante la visita."
+    }
+   ]
+  },
+  {
+   "sentences": [
+    {
+     "gold": "en",
+     "text": "The festival takes place in Amsterdam every year at the end of August."
+    },
+    {
+     "gold": "nl",
+     "text": "Iedereen is welkom en de toegang is gratis voor alle bezoekers."
+    },
+    {
+     "gold": "en",
+     "text": "Bring a jacket because evenings can get quite cool."
+    }
+   ]
+  },
+  {
+   "sentences": [
+    {
+     "gold": "de",
+     "text": "Unser neuer Kopfhörer bietet einen kraftvollen Klang und über dreißig Stunden Akkulaufzeit."
+    },
+    {
+     "gold": "en",
+     "text": "Just plug in and play, anywhere you go."
+    },
+    {
+     "gold": "de",
+     "text": "Jetzt in drei Farben bei allen Händlern erhältlich."
+    }
+   ]
+  },
+  {
+   "sentences": [
+    {
+     "gold": "es",
+     "text": "En su discurso, la presidenta recordó una frase famosa de la historia."
+    },
+    {
+     "gold": "en",
+     "text": "Ask not what your country can do for you."
+    },
+    {
+     "gold": "es",
+     "text": "Esa idea sigue inspirando a muchos jóvenes en todo el mundo."
+    }
+   ]
+  },
+  {
+   "sentences": [
+    {
+     "gold": "fr",
+     "text": "Les touristes arrivent en grand nombre dans cette petite ville alsacienne."
+    },
+    {
+     "gold": "de",
+     "text": "Willkommen in unserem Hotel, wir wünschen Ihnen einen angenehmen Aufenthalt."
+    },
+    {
+     "gold": "fr",
+     "text": "Le petit déjeuner est servi chaque matin de sept heures à dix heures."
+    }
+   ]
+  },
+  {
+   "sentences": [
+    {
+     "gold": "de",
+     "text": "Das Projekt ist fast fertig und wir liegen gut im Zeitplan."
+    },
+    {
+     "gold": "de",
+     "text": "Super!"
+    },
+    {
+     "gold": "de",
+     "text": "Morgen präsentieren wir die Ergebnisse dem gesamten Vorstand."
+    },
+    {
+     "gold": "de",
+     "text": "Okay."
+    }
+   ]
+  },
+  {
+   "sentences": [
+    {
+     "gold": "en",
+     "text": "The new manager started on Monday and introduced herself to everyone."
+    },
+    {
+     "gold": "en",
+     "text": "Her name is Käthe Böhm."
+    },
+    {
+     "gold": "en",
+     "text": "She previously worked for a software company in Munich."
+    }
+   ]
+  },
+  {
+   "sentences": [
+    {
+     "gold": "de",
+     "text": "Der Entwickler sagte im Interview, das Team habe den Release termingerecht geliefert."
+    },
+    {
+     "gold": "de",
+     "text": "Trotzdem gab es einige Bugs, die erst nach dem Deployment aufgefallen sind."
+    }
+   ]
+  },
+  {
+   "sentences": [
+    {
+     "gold": "de",
+     "text": "Hast du schon die neue Version ausprobiert, die gestern erschienen ist?"
+    },
+    {
+     "gold": "de",
+     "text": "Ja."
+    },
+    {
+     "gold": "de",
+     "text": "Und?"
+    },
+    {
+     "gold": "de",
+     "text": "Sie läuft deutlich schneller als die alte, vor allem beim Start."
+    },
+    {
+     "gold": "de",
+     "text": "Cool."
+    }
+   ]
+  },
+  {
+   "sentences": [
+    {
+     "gold": "en",
+     "text": "We had dinner at a tiny restaurant near the harbour last Friday."
+    },
+    {
+     "gold": "fr",
+     "text": "Le plat du jour était un délicieux poulet rôti aux herbes de Provence."
+    },
+    {
+     "gold": "en",
+     "text": "Wow."
+    },
+    {
+     "gold": "en",
+     "text": "Honestly, the best meal we had during the whole trip."
+    }
+   ]
+  },
+  {
+   "sentences": [
+    {
+     "gold": "es",
+     "text": "El proyecto empezó en enero y terminó en diciembre sin grandes problemas."
+    },
+    {
+     "gold": "es",
+     "text": "Okay."
+    },
+    {
+     "gold": "es",
+     "text": "Su director, Mark Thompson, recibió un premio por el trabajo."
+    },
+    {
+     "gold": "es",
+     "text": "Todos estaban muy contentos con el resultado final."
+    }
+   ]
+  },
+  {
+   "sentences": [
+    {
+     "gold": "en",
+     "text": "The company announced a new partnership on Tuesday morning."
+    },
+    {
+     "gold": "en",
+     "text": "Siemens and Bosch will jointly develop battery storage systems."
+    },
+    {
+     "gold": "en",
+     "text": "Analysts expect the deal to be completed before the end of next year."
+    }
+   ]
+  },
+  {
+   "sentences": [
+    {
+     "gold": "de",
+     "text": "Die Kampagne wurde unter dem Motto veröffentlicht, das überall zu sehen war."
+    },
+    {
+     "gold": "en",
+     "text": "Think different and challenge everything you know."
+    },
+    {
+     "gold": "de",
+     "text": "Viele Kunden fanden den Slogan zunächst irritierend, später aber sehr einprägsam."
+    },
+    {
+     "gold": "en",
+     "text": "Just do it."
+    }
+   ]
+  },
+  {
+   "sentences": [
+    {
+     "gold": "it",
+     "text": "Durante il viaggio a Parigi abbiamo visitato molti musei interessanti."
+    },
+    {
+     "gold": "fr",
+     "text": "Excusez-moi, pourriez-vous m'indiquer le chemin de la tour Eiffel ?"
+    },
+    {
+     "gold": "it",
+     "text": "Il passante ci ha risposto gentilmente e ci ha accompagnato fino all'angolo."
+    }
+   ]
+  },
+  {
+   "sentences": [
+    {
+     "gold": "fr",
+     "text": "Pour commencer, ouvrez le menu principal et choisissez les paramètres."
+    },
+    {
+     "gold": "en",
+     "text": "Click on the Save button to apply all changes."
+    },
+    {
+     "gold": "fr",
+     "text": "Ensuite, redémarrez l'application pour que tout fonctionne correctement."
+    }
+   ]
+  },
+  {
+   "sentences": [
+    {
+     "gold": "de",
+     "text": "Wir müssen das Ticket im Backlog priorisieren und dem Team im nächsten Daily vorstellen."
+    },
+    {
+     "gold": "de",
+     "text": "Der Pull Request wartet seit zwei Tagen auf ein Review."
+    },
+    {
+     "gold": "de",
+     "text": "Danach können wir das Feature im Staging testen und live deployen."
+    }
+   ]
+  },
+  {
+   "sentences": [
+    {
+     "gold": "es",
+     "text": "Después de una semana en España volvimos a casa con muchos recuerdos."
+    },
+    {
+     "gold": "en",
+     "text": "At the airport a friendly officer wished us a safe flight."
+    },
+    {
+     "gold": "de",
+     "text": "Zu Hause wartete schon die ganze Familie mit einem großen Abendessen."
+    },
+    {
+     "gold": "de",
+     "text": "Das Essen war köstlich und der Abend sehr gemütlich."
+    }
+   ]
+  },
+  {
+   "sentences": [
+    {
+     "gold": "en",
+     "text": "The chef lifted the lid and the whole kitchen filled with a wonderful smell."
+    },
+    {
+     "gold": "it",
+     "text": "Mamma mia, che profumo!"
+    },
+    {
+     "gold": "en",
+     "text": "Everyone gathered around the table and waited impatiently for the first plate."
+    }
+   ]
+  },
+  {
+   "sentences": [
+    {
+     "gold": "de",
+     "text": "Die Kollegin fragte mich, ob ich am Freitag früher gehen könnte."
+    },
+    {
+     "gold": "en",
+     "text": "Sure, no problem."
+    },
+    {
+     "gold": "de",
+     "text": "Ich habe ihr dann den Schlüssel gegeben und bin nach Hause gefahren."
+    }
+   ]
+  },
+  {
+   "sentences": [
+    {
+     "gold": "en",
+     "text": "She moved to Rotterdam two years ago and works as a translator."
+    },
+    {
+     "gold": "nl",
+     "text": "Ik woon hier met veel plezier en ik spreek inmiddels vloeiend Nederlands."
+    },
+    {
+     "gold": "en",
+     "text": "Her colleagues were impressed by how quickly she learned the language."
+    }
+   ]
+  },
+  {
+   "sentences": [
+    {
+     "gold": "pt",
+     "text": "No ano passado visitámos Lisboa e ficámos num hotel perto do rio."
+    },
+    {
+     "gold": "pt",
+     "text": "Obrigado."
+    },
+    {
+     "gold": "pt",
+     "text": "O pessoal do hotel foi muito simpático e ajudou-nos com tudo."
+    }
+   ]
+  },
+  {
+   "sentences": [
+    {
+     "gold": "de",
+     "text": "Öffne zuerst das Terminal und wechsle in den Projektordner."
+    },
+    {
+     "gold": "de",
+     "text": "Mit `git status` siehst du, welche Dateien sich geändert haben."
+    },
+    {
+     "gold": "de",
+     "text": "Danach kannst du die Änderungen mit einem Commit speichern."
+    }
+   ]
+  }
+ ]
+}

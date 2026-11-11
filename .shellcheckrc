@@ -1,0 +1,6 @@
+# Modules share globals across files (common.sh defines, other modules read), which
+# shellcheck cannot see when it checks one file at a time.
+disable=SC2034
+shell=bash
+external-sources=true
+source-path=SCRIPTDIR
